@@ -82,10 +82,15 @@ fn equity_overlay(series: &[(String, BacktestResult)]) -> View {
             let swatch = format!(
                 "display:inline-block;width:10px;height:10px;background:{color};margin-right:4px"
             );
+            // Show the entry date + P/E when this run used a P/E-minimum entry.
+            let entry = match (r.entry_date, r.entry_pe) {
+                (Some(d), Some(pe)) => format!(" (from {d}, P/E {pe:.1})"),
+                _ => String::new(),
+            };
             view! {
                 <span style="margin-right:1rem;white-space:nowrap">
                     <span style=swatch></span>
-                    {name.clone()} " " {fmt_pct(r.metrics.total_return)}
+                    {name.clone()} " " {fmt_pct(r.metrics.total_return)} {entry}
                 </span>
             }
         })
@@ -120,6 +125,7 @@ fn App() -> impl IntoView {
     let candidates = create_rw_signal::<Option<Result<Vec<Candidate>, String>>>(None);
     let selected = create_rw_signal::<HashSet<String>>(HashSet::new());
     let overlay = create_rw_signal::<Vec<(String, BacktestResult)>>(Vec::new());
+    let pe_entry = create_rw_signal(false); // enter at each name's local-min P/E
 
     let run_price = move |_| {
         let url = format!(
@@ -150,12 +156,17 @@ fn App() -> impl IntoView {
 
     let run_selected = move |_| {
         let tickers: Vec<String> = selected.get().into_iter().collect();
-        let yrs = years.get();
+        // Either enter at each name's local-min P/E, or use the fixed timeframe.
+        let entry = if pe_entry.get() {
+            "&entry=pe_min".to_string()
+        } else {
+            format!("&years={}", years.get())
+        };
         busy.set(true);
         spawn_local(async move {
             let mut out = Vec::new();
             for t in tickers {
-                let url = format!("/api/backtest?ticker={t}&strategy=buy_and_hold&years={yrs}");
+                let url = format!("/api/backtest?ticker={t}&strategy=buy_and_hold{entry}");
                 if let Ok(r) = get_json::<BacktestResult>(&url).await {
                     out.push((t, r));
                 }
@@ -291,8 +302,14 @@ fn App() -> impl IntoView {
                                     </thead>
                                     <tbody>{rows}</tbody>
                                 </table>
-                                <button on:click=run_selected prop:disabled=move || busy.get()
-                                    style="margin-top:.5rem">"Backtest selected"</button>
+                                <div style="margin-top:.5rem;display:flex;gap:.75rem;align-items:center">
+                                    <button on:click=run_selected prop:disabled=move || busy.get()>"Backtest selected"</button>
+                                    <label title="Start each backtest at that name's most recent local-minimum P/E instead of the fixed timeframe">
+                                        <input type="checkbox" prop:checked=pe_entry
+                                            on:change=move |e| pe_entry.set(event_target_checked(&e)) />
+                                        " enter at local-min P/E"
+                                    </label>
+                                </div>
                             }.into_view()
                         }
                     }}

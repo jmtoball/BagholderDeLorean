@@ -57,6 +57,18 @@ const legend = await page.locator('section span span').count();
 console.log(`OK: overlay drew ${lineCount} equity curves, ${legend} legend swatches`);
 await page.screenshot({ path: `${SHOT}/03-overlay.png`, fullPage: true });
 
+// --- Local-min P/E entry: legend should show per-name entry dates ---
+await page.locator('label', { hasText: 'enter at local-min P/E' }).locator('input').check();
+await page.getByRole('button', { name: 'Backtest selected' }).click();
+await page.waitForFunction(
+  () => [...document.querySelectorAll('span')].some((s) => /from \d{4}-\d\d-\d\d/.test(s.textContent)),
+  { timeout: 60000 },
+);
+const entriesShown = await page.locator('span').filter({ hasText: /from \d{4}-\d\d-\d\d/ }).count();
+if (entriesShown < 1) fail('pe_min: no entry dates in legend');
+console.log(`OK: local-min entry legend shows ${entriesShown} entry dates`);
+await page.screenshot({ path: `${SHOT}/04-pe-min.png`, fullPage: true });
+
 if (errors.length) fail('console/page errors: ' + errors.join(' ;; '));
 else console.log('OK: no console/page errors');
 

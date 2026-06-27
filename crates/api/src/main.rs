@@ -9,7 +9,9 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use bagholder_core::{run_backtest, Bar, BacktestResult, Candidate, Fundamental, Strategy};
+use bagholder_core::{
+    local_minima, pe_series, run_backtest, Bar, BacktestResult, Candidate, Fundamental, Strategy,
+};
 use bagholder_data::Store;
 use serde::Deserialize;
 use tower_http::{cors::CorsLayer, services::ServeDir};
@@ -27,10 +29,23 @@ struct BacktestQuery {
     slow: Option<usize>,
     /// Trim to the last N years before running; omitted or 0 = full history.
     years: Option<u32>,
+    /// "pe_min" enters at the most recent local-minimum P/E (overrides `years`).
+    entry: Option<String>,
+    /// Trough window for `entry=pe_min`, in trading days (default ~a quarter).
+    pe_window: Option<usize>,
 }
 
 fn default_strategy() -> String {
     "buy_and_hold".into()
+}
+
+/// Pull quarterly EPS out of a fundamentals set as `(period, value)`.
+fn quarterly_eps(funds: &[Fundamental]) -> Vec<(chrono::NaiveDate, f64)> {
+    funds
+        .iter()
+        .filter(|f| f.metric == "eps_basic" && f.period_type == "Q")
+        .map(|f| (f.period, f.value))
+        .collect()
 }
 
 /// Keep only the last `years` of bars (relative to the most recent bar, so it
@@ -56,14 +71,40 @@ async fn backtest(
     };
 
     let ticker = q.ticker.clone();
+    let pe_min = q.entry.as_deref() == Some("pe_min");
     // Blocking DB + network I/O must not run on the async runtime's workers.
-    let bars = tokio::task::spawn_blocking(move || db.lock().unwrap().ohlcv(&ticker))
-        .await
-        .map_err(internal)?
-        .map_err(internal)?;
+    let (bars, eps) = tokio::task::spawn_blocking(move || {
+        let db = db.lock().unwrap();
+        let bars = db.ohlcv(&ticker)?;
+        // Only the fundamentals fetch is conditional — skip it for plain runs.
+        let eps = if pe_min {
+            quarterly_eps(&db.fundamentals(&ticker)?)
+        } else {
+            Vec::new()
+        };
+        Ok::<_, anyhow::Error>((bars, eps))
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
 
-    let bars = trim_years(bars, q.years);
-    Ok(Json(run_backtest(&bars, &strategy)))
+    if pe_min {
+        let series = pe_series(&bars, &eps);
+        let window = q.pe_window.unwrap_or(63);
+        // Most recent confirmed trough -> entry point.
+        let Some(&idx) = local_minima(&series, window).last() else {
+            return Err((StatusCode::UNPROCESSABLE_ENTITY,
+                "no P/E history to find a minimum (missing EPS?)".into()));
+        };
+        let (entry_date, entry_pe) = series[idx];
+        let trimmed: Vec<Bar> = bars.into_iter().filter(|b| b.date >= entry_date).collect();
+        let mut result = run_backtest(&trimmed, &strategy);
+        result.entry_date = Some(entry_date);
+        result.entry_pe = Some(entry_pe);
+        Ok(Json(result))
+    } else {
+        Ok(Json(run_backtest(&trim_years(bars, q.years), &strategy)))
+    }
 }
 
 #[derive(Deserialize)]
