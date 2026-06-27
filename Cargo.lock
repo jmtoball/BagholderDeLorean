@@ -370,6 +370,7 @@ dependencies = [
  "axum",
  "bagholder-core",
  "bagholder-data",
+ "chrono",
  "serde",
  "serde_json",
  "tokio",
@@ -402,9 +403,11 @@ name = "bagholder-web"
 version = "0.1.0"
 dependencies = [
  "bagholder-core",
+ "chrono",
  "console_error_panic_hook",
  "gloo-net",
  "leptos",
+ "serde",
 ]
 
 [[package]]

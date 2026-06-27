@@ -22,8 +22,12 @@ use serde::Deserialize;
 /// ponytail: the v8 chart endpoint is undocumented but stable and keyless. If
 /// Yahoo starts rate-limiting bursts, add a small backoff or a paid feed.
 pub fn download_ohlcv(symbol: &str) -> Result<Vec<Bar>> {
-    let url =
-        format!("https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=max&interval=1d");
+    // Explicit period1/period2 over `range=max`: the latter makes Yahoo silently
+    // downsample to monthly bars. period1=0 (epoch) pulls full daily history.
+    let url = format!(
+        "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}\
+         ?period1=0&period2=9999999999&interval=1d"
+    );
     let body = reqwest::blocking::Client::builder()
         .user_agent("Mozilla/5.0 (compatible; BagholderDeLorean/0.1)")
         .build()?

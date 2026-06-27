@@ -1,5 +1,5 @@
 //! HTTP API: runs backtests and serves the WASM frontend.
-//!   GET /api/backtest?ticker=AAPL.US&strategy=sma_crossover&fast=20&slow=50
+//!   GET /api/backtest?ticker=AAPL&strategy=sma_crossover&fast=20&slow=50&years=10
 
 use std::sync::{Arc, Mutex};
 
@@ -9,7 +9,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use bagholder_core::{run_backtest, BacktestResult, Candidate, Fundamental, Strategy};
+use bagholder_core::{run_backtest, Bar, BacktestResult, Candidate, Fundamental, Strategy};
 use bagholder_data::Store;
 use serde::Deserialize;
 use tower_http::{cors::CorsLayer, services::ServeDir};
@@ -25,10 +25,22 @@ struct BacktestQuery {
     strategy: String,
     fast: Option<usize>,
     slow: Option<usize>,
+    /// Trim to the last N years before running; omitted or 0 = full history.
+    years: Option<u32>,
 }
 
 fn default_strategy() -> String {
     "buy_and_hold".into()
+}
+
+/// Keep only the last `years` of bars (relative to the most recent bar, so it
+/// works the same whether or not the cache is current).
+fn trim_years(mut bars: Vec<Bar>, years: Option<u32>) -> Vec<Bar> {
+    if let (Some(y), Some(last)) = (years.filter(|y| *y > 0), bars.last()) {
+        let cutoff = last.date - chrono::Duration::days(365 * y as i64);
+        bars.retain(|b| b.date >= cutoff);
+    }
+    bars
 }
 
 async fn backtest(
@@ -50,6 +62,7 @@ async fn backtest(
         .map_err(internal)?
         .map_err(internal)?;
 
+    let bars = trim_years(bars, q.years);
     Ok(Json(run_backtest(&bars, &strategy)))
 }
 

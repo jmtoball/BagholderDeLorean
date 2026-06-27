@@ -1,122 +1,306 @@
-//! One-page strategy dashboard (Leptos CSR). Reuses bagholder-core's DTOs so
-//! the JSON from the API deserializes straight into typed structs. Equity
-//! curve is an inline SVG polyline — no charting dependency.
+//! One-page dashboard (Leptos CSR). Two flows behind a category selector:
+//!  - Price Strategies: ticker + strategy -> single backtest.
+//!  - Fundamentals: run a screen -> pick names -> backtest them overlaid.
+//! Reuses bagholder-core's DTOs so API JSON deserializes into typed structs.
+//! Charts are inline SVG polylines — no charting dependency.
 
-use bagholder_core::BacktestResult;
+use std::collections::HashSet;
+
+use bagholder_core::{BacktestResult, Candidate};
+use chrono::Datelike;
 use leptos::*;
+use serde::de::DeserializeOwned;
 
+const PALETTE: &[&str] = &[
+    "#2563eb", "#dc2626", "#16a34a", "#d97706", "#7c3aed", "#0891b2", "#db2777", "#65a30d",
+];
 const CHART_W: f64 = 720.0;
-const CHART_H: f64 = 240.0;
+const CHART_H: f64 = 260.0;
 
-#[component]
-fn App() -> impl IntoView {
-    let (ticker, set_ticker) = create_signal("AAPL".to_string());
-    let (strategy, set_strategy) = create_signal("buy_and_hold".to_string());
-    let (fast, set_fast) = create_signal(20usize);
-    let (slow, set_slow) = create_signal(50usize);
-    let (result, set_result) = create_signal::<Option<Result<BacktestResult, String>>>(None);
-    let (loading, set_loading) = create_signal(false);
-
-    let run = move |_| {
-        let url = format!(
-            "/api/backtest?ticker={}&strategy={}&fast={}&slow={}",
-            ticker.get(),
-            strategy.get(),
-            fast.get(),
-            slow.get()
-        );
-        set_loading.set(true);
-        spawn_local(async move {
-            let res = async {
-                let resp = gloo_net::http::Request::get(&url)
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                if !resp.ok() {
-                    return Err(resp.text().await.unwrap_or_default());
-                }
-                resp.json::<BacktestResult>().await.map_err(|e| e.to_string())
-            }
-            .await;
-            set_result.set(Some(res));
-            set_loading.set(false);
-        });
-    };
-
-    view! {
-        <main style="font-family:system-ui;max-width:760px;margin:2rem auto;padding:0 1rem">
-            <h1>"Bagholder DeLorean"</h1>
-            <div style="display:flex;gap:.75rem;flex-wrap:wrap;align-items:end">
-                <label>"Ticker"<br/>
-                    <input prop:value=ticker
-                        on:input=move |e| set_ticker.set(event_target_value(&e)) />
-                </label>
-                <label>"Strategy"<br/>
-                    <select on:change=move |e| set_strategy.set(event_target_value(&e))>
-                        <option value="buy_and_hold">"Buy & Hold"</option>
-                        <option value="sma_crossover">"SMA crossover"</option>
-                    </select>
-                </label>
-                <label>"Fast"<br/>
-                    <input type="number" prop:value=move || fast.get().to_string()
-                        on:input=move |e| set_fast.set(event_target_value(&e).parse().unwrap_or(20)) />
-                </label>
-                <label>"Slow"<br/>
-                    <input type="number" prop:value=move || slow.get().to_string()
-                        on:input=move |e| set_slow.set(event_target_value(&e).parse().unwrap_or(50)) />
-                </label>
-                <button on:click=run prop:disabled=loading>"Run backtest"</button>
-            </div>
-
-            {move || match result.get() {
-                None => view! { <p>"Define a strategy and run."</p> }.into_view(),
-                Some(Err(e)) => view! { <p style="color:#c00">"Error: " {e}</p> }.into_view(),
-                Some(Ok(r)) => view! {
-                    <section>
-                        <ul>
-                            <li>"Total return: " {fmt_pct(r.metrics.total_return)}</li>
-                            <li>"CAGR: " {fmt_pct(r.metrics.cagr)}</li>
-                            <li>"Max drawdown: " {fmt_pct(r.metrics.max_drawdown)}</li>
-                            <li>"Sharpe: " {format!("{:.2}", r.metrics.sharpe)}</li>
-                        </ul>
-                        {equity_svg(&r)}
-                    </section>
-                }.into_view(),
-            }}
-        </main>
+async fn get_json<T: DeserializeOwned>(url: &str) -> Result<T, String> {
+    let resp = gloo_net::http::Request::get(url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(resp.text().await.unwrap_or_default());
     }
+    resp.json::<T>().await.map_err(|e| e.to_string())
 }
 
 fn fmt_pct(x: f64) -> String {
     format!("{:.1}%", x * 100.0)
 }
 
-fn equity_svg(r: &BacktestResult) -> View {
-    let eq: Vec<f64> = r.curve.iter().map(|p| p.equity).collect();
-    if eq.len() < 2 {
+/// Overlay one or more equity curves on a shared date/value scale, with a
+/// legend showing each series' total return. Curves all start at 1.0, so they
+/// are directly comparable.
+fn equity_overlay(series: &[(String, BacktestResult)]) -> View {
+    let series: Vec<&(String, BacktestResult)> =
+        series.iter().filter(|(_, r)| r.curve.len() >= 2).collect();
+    if series.is_empty() {
         return view! { <p>"Not enough data to chart."</p> }.into_view();
     }
-    let (min, max) = eq
-        .iter()
-        .fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
-    let span = (max - min).max(1e-9);
-    let points: String = eq
+
+    let (mut dmin, mut dmax) = (i32::MAX, i32::MIN);
+    let (mut ymin, mut ymax) = (f64::MAX, f64::MIN);
+    for (_, r) in &series {
+        for p in &r.curve {
+            let d = p.date.num_days_from_ce();
+            dmin = dmin.min(d);
+            dmax = dmax.max(d);
+            ymin = ymin.min(p.equity);
+            ymax = ymax.max(p.equity);
+        }
+    }
+    let dspan = (dmax - dmin).max(1) as f64;
+    let yspan = (ymax - ymin).max(1e-9);
+
+    let lines = series
         .iter()
         .enumerate()
-        .map(|(i, &v)| {
-            let x = i as f64 / (eq.len() - 1) as f64 * CHART_W;
-            let y = CHART_H - (v - min) / span * CHART_H;
-            format!("{x:.1},{y:.1} ")
+        .map(|(i, (_, r))| {
+            let color = PALETTE[i % PALETTE.len()];
+            let points: String = r
+                .curve
+                .iter()
+                .map(|p| {
+                    let x = (p.date.num_days_from_ce() - dmin) as f64 / dspan * CHART_W;
+                    let y = CHART_H - (p.equity - ymin) / yspan * CHART_H;
+                    format!("{x:.1},{y:.1} ")
+                })
+                .collect();
+            view! { <polyline points=points fill="none" stroke=color stroke-width="1.5" /> }
         })
-        .collect();
+        .collect_view();
+
+    let legend = series
+        .iter()
+        .enumerate()
+        .map(|(i, (name, r))| {
+            let color = PALETTE[i % PALETTE.len()];
+            let swatch = format!(
+                "display:inline-block;width:10px;height:10px;background:{color};margin-right:4px"
+            );
+            view! {
+                <span style="margin-right:1rem;white-space:nowrap">
+                    <span style=swatch></span>
+                    {name.clone()} " " {fmt_pct(r.metrics.total_return)}
+                </span>
+            }
+        })
+        .collect_view();
 
     view! {
-        <svg viewBox=format!("0 0 {CHART_W} {CHART_H}") preserveAspectRatio="none"
-             style="border:1px solid #ddd;width:100%;height:auto">
-            <polyline points=points fill="none" stroke="#2563eb" stroke-width="2" />
-        </svg>
+        <div>
+            <svg viewBox=format!("0 0 {CHART_W} {CHART_H}") preserveAspectRatio="none"
+                 style="border:1px solid #ddd;width:100%;height:auto">
+                {lines}
+            </svg>
+            <div style="margin-top:.5rem;font-size:.9rem">{legend}</div>
+        </div>
     }
     .into_view()
+}
+
+#[component]
+fn App() -> impl IntoView {
+    let category = create_rw_signal("price".to_string());
+    let years = create_rw_signal(10u32);
+    let busy = create_rw_signal(false);
+
+    // Price-strategy branch
+    let ticker = create_rw_signal("AAPL".to_string());
+    let price_strategy = create_rw_signal("buy_and_hold".to_string());
+    let fast = create_rw_signal(20usize);
+    let slow = create_rw_signal(50usize);
+    let price_result = create_rw_signal::<Option<Result<BacktestResult, String>>>(None);
+
+    // Fundamentals branch
+    let candidates = create_rw_signal::<Option<Result<Vec<Candidate>, String>>>(None);
+    let selected = create_rw_signal::<HashSet<String>>(HashSet::new());
+    let overlay = create_rw_signal::<Vec<(String, BacktestResult)>>(Vec::new());
+
+    let run_price = move |_| {
+        let url = format!(
+            "/api/backtest?ticker={}&strategy={}&fast={}&slow={}&years={}",
+            ticker.get(),
+            price_strategy.get(),
+            fast.get(),
+            slow.get(),
+            years.get()
+        );
+        busy.set(true);
+        spawn_local(async move {
+            price_result.set(Some(get_json::<BacktestResult>(&url).await));
+            busy.set(false);
+        });
+    };
+
+    let run_screen = move |_| {
+        busy.set(true);
+        selected.update(|s| s.clear());
+        overlay.set(Vec::new());
+        spawn_local(async move {
+            let res = get_json::<Vec<Candidate>>("/api/screen?kind=low_pe&limit=12").await;
+            candidates.set(Some(res));
+            busy.set(false);
+        });
+    };
+
+    let run_selected = move |_| {
+        let tickers: Vec<String> = selected.get().into_iter().collect();
+        let yrs = years.get();
+        busy.set(true);
+        spawn_local(async move {
+            let mut out = Vec::new();
+            for t in tickers {
+                let url = format!("/api/backtest?ticker={t}&strategy=buy_and_hold&years={yrs}");
+                if let Ok(r) = get_json::<BacktestResult>(&url).await {
+                    out.push((t, r));
+                }
+            }
+            overlay.set(out);
+            busy.set(false);
+        });
+    };
+
+    view! {
+        <main style="font-family:system-ui;max-width:820px;margin:2rem auto;padding:0 1rem">
+            <h1>"Bagholder DeLorean"</h1>
+
+            <div style="display:flex;gap:.75rem;flex-wrap:wrap;align-items:end">
+                <label>"Category"<br/>
+                    <select on:change=move |e| category.set(event_target_value(&e))>
+                        <option value="price">"Price Strategies"</option>
+                        <option value="fundamentals">"Fundamentals"</option>
+                    </select>
+                </label>
+
+                // Second-level choice depends on category
+                {move || if category.get() == "price" {
+                    view! {
+                        <label>"Strategy"<br/>
+                            <select on:change=move |e| price_strategy.set(event_target_value(&e))>
+                                <option value="buy_and_hold">"Buy & Hold"</option>
+                                <option value="sma_crossover">"SMA crossover"</option>
+                            </select>
+                        </label>
+                        <label>"Ticker"<br/>
+                            <input prop:value=ticker on:input=move |e| ticker.set(event_target_value(&e)) />
+                        </label>
+                    }.into_view()
+                } else {
+                    view! {
+                        <label>"Screen"<br/>
+                            <select>
+                                <option value="low_pe">"Low P/E (industry-rel.)"</option>
+                            </select>
+                        </label>
+                    }.into_view()
+                }}
+
+                // SMA params, only when relevant
+                {move || (category.get() == "price" && price_strategy.get() == "sma_crossover")
+                    .then(|| view! {
+                        <label>"Fast"<br/>
+                            <input type="number" prop:value=move || fast.get().to_string()
+                                on:input=move |e| fast.set(event_target_value(&e).parse().unwrap_or(20)) />
+                        </label>
+                        <label>"Slow"<br/>
+                            <input type="number" prop:value=move || slow.get().to_string()
+                                on:input=move |e| slow.set(event_target_value(&e).parse().unwrap_or(50)) />
+                        </label>
+                    })}
+
+                <label>"Timeframe"<br/>
+                    <select on:change=move |e| years.set(event_target_value(&e).parse().unwrap_or(10))>
+                        <option value="1">"1y"</option>
+                        <option value="3">"3y"</option>
+                        <option value="5">"5y"</option>
+                        <option value="10" selected=true>"10y"</option>
+                        <option value="0">"Max"</option>
+                    </select>
+                </label>
+
+                {move || if category.get() == "price" {
+                    view! { <button on:click=run_price prop:disabled=move || busy.get()>"Run backtest"</button> }.into_view()
+                } else {
+                    view! { <button on:click=run_screen prop:disabled=move || busy.get()>"Run screen"</button> }.into_view()
+                }}
+            </div>
+
+            // --- Price results ---
+            {move || (category.get() == "price").then(|| view! {
+                <section>
+                    {move || match price_result.get() {
+                        None => view! { <p>"Define a strategy and run."</p> }.into_view(),
+                        Some(Err(e)) => view! { <p style="color:#c00">"Error: " {e}</p> }.into_view(),
+                        Some(Ok(r)) => {
+                            let series = vec![(ticker.get(), r.clone())];
+                            view! {
+                                <ul>
+                                    <li>"Total return: " {fmt_pct(r.metrics.total_return)}</li>
+                                    <li>"CAGR: " {fmt_pct(r.metrics.cagr)}</li>
+                                    <li>"Max drawdown: " {fmt_pct(r.metrics.max_drawdown)}</li>
+                                    <li>"Sharpe: " {format!("{:.2}", r.metrics.sharpe)}</li>
+                                </ul>
+                                {equity_overlay(&series)}
+                            }.into_view()
+                        }
+                    }}
+                </section>
+            })}
+
+            // --- Fundamentals: screen table + overlay ---
+            {move || (category.get() == "fundamentals").then(|| view! {
+                <section>
+                    {move || match candidates.get() {
+                        None => view! { <p>"Run the screen to surface cheap-vs-industry names."</p> }.into_view(),
+                        Some(Err(e)) => view! { <p style="color:#c00">"Error: " {e}</p> }.into_view(),
+                        Some(Ok(cands)) => {
+                            let rows = cands.iter().map(|c| {
+                                let t_checked = c.ticker.clone();
+                                let t_toggle = c.ticker.clone();
+                                view! {
+                                    <tr>
+                                        <td>
+                                            <input type="checkbox"
+                                                prop:checked=move || selected.with(|s| s.contains(&t_checked))
+                                                on:change=move |_| selected.update(|s| {
+                                                    if !s.remove(&t_toggle) { s.insert(t_toggle.clone()); }
+                                                }) />
+                                        </td>
+                                        <td>{c.ticker.clone()}</td>
+                                        <td>{c.industry.clone()}</td>
+                                        <td style="text-align:right">{format!("{:.1}", c.pe)}</td>
+                                        <td style="text-align:right">{format!("{:.1}", c.industry_median_pe)}</td>
+                                        <td style="text-align:right">{format!("{:.2}", c.relative_pe)}</td>
+                                    </tr>
+                                }
+                            }).collect_view();
+                            view! {
+                                <table style="border-collapse:collapse;width:100%;font-size:.9rem">
+                                    <thead>
+                                        <tr style="text-align:left;border-bottom:1px solid #ccc">
+                                            <th></th><th>"Ticker"</th><th>"Industry"</th>
+                                            <th style="text-align:right">"P/E"</th>
+                                            <th style="text-align:right">"Ind. median"</th>
+                                            <th style="text-align:right">"Rel."</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>{rows}</tbody>
+                                </table>
+                                <button on:click=run_selected prop:disabled=move || busy.get()
+                                    style="margin-top:.5rem">"Backtest selected"</button>
+                            }.into_view()
+                        }
+                    }}
+                    {move || { let o = overlay.get(); (!o.is_empty()).then(|| equity_overlay(&o)) }}
+                </section>
+            })}
+        </main>
+    }
 }
 
 fn main() {

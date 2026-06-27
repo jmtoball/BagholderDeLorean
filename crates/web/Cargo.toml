@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 bagholder-core = { path = "../core" }
+chrono = { workspace = true }
+serde = { workspace = true }
 leptos = { version = "0.6", features = ["csr"] }
 gloo-net = { version = "0.6", features = ["http"] }
 console_error_panic_hook = "0.1"
