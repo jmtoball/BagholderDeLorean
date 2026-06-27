@@ -84,6 +84,13 @@ async fn backtest(
             bb_period: q.bb_period.unwrap_or(20),
             bb_std: q.bb_std.unwrap_or(2.0),
         },
+        "regime_mean_reversion" => Strategy::RegimeMeanReversion {
+            rsi_period: q.rsi_period.unwrap_or(14),
+            rsi_entry: q.rsi_threshold.unwrap_or(30.0),
+            rsi_exit: 70.0,
+            adx_period: 14,
+            adx_threshold: 25.0,
+        },
         _ => Strategy::BuyAndHold,
     };
 

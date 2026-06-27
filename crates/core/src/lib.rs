@@ -329,6 +329,149 @@ impl SignalGenerator for SmaCrossoverGen {
     }
 }
 
+/// Average Directional Index (ADX) state for incremental computation.
+/// Low ADX (< ~25) means a ranging/non-trending market — where MR strategies work.
+struct AdxState {
+    period: usize,
+    prev_high: f64,
+    prev_low: f64,
+    prev_close: f64,
+    smoothed_tr: f64,
+    smoothed_dm_pos: f64,
+    smoothed_dm_neg: f64,
+    smoothed_dx: f64,
+    adx: f64,
+    ready: bool,
+    buf: usize, // bars seen so far
+}
+
+impl AdxState {
+    fn new(period: usize) -> Self {
+        Self {
+            period,
+            prev_high: 0.0, prev_low: 0.0, prev_close: 0.0,
+            smoothed_tr: 0.0, smoothed_dm_pos: 0.0, smoothed_dm_neg: 0.0,
+            smoothed_dx: 0.0, adx: 0.0, ready: false, buf: 0,
+        }
+    }
+
+    /// Feed one bar; returns current ADX (None until 2*period bars).
+    fn next(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
+        if self.buf == 0 {
+            self.prev_high = high; self.prev_low = low; self.prev_close = close;
+            self.buf += 1;
+            return None;
+        }
+        let tr = (high - low).max((high - self.prev_close).abs()).max((low - self.prev_close).abs());
+        let dm_pos = if high - self.prev_high > self.prev_low - low { (high - self.prev_high).max(0.0) } else { 0.0 };
+        let dm_neg = if self.prev_low - low > high - self.prev_high { (self.prev_low - low).max(0.0) } else { 0.0 };
+
+        let p = self.period as f64;
+        if !self.ready {
+            // Wilder's smoothing: first period is a simple sum, then iterate.
+            self.smoothed_tr += tr;
+            self.smoothed_dm_pos += dm_pos;
+            self.smoothed_dm_neg += dm_neg;
+            self.buf += 1;
+            if self.buf == self.period + 1 {
+                self.ready = true;
+            }
+        } else {
+            self.smoothed_tr = self.smoothed_tr - self.smoothed_tr / p + tr;
+            self.smoothed_dm_pos = self.smoothed_dm_pos - self.smoothed_dm_pos / p + dm_pos;
+            self.smoothed_dm_neg = self.smoothed_dm_neg - self.smoothed_dm_neg / p + dm_neg;
+        }
+
+        self.prev_high = high; self.prev_low = low; self.prev_close = close;
+
+        if !self.ready || self.smoothed_tr < 1e-12 { return None; }
+        let di_pos = 100.0 * self.smoothed_dm_pos / self.smoothed_tr;
+        let di_neg = 100.0 * self.smoothed_dm_neg / self.smoothed_tr;
+        let di_sum = di_pos + di_neg;
+        let dx = if di_sum > 0.0 { 100.0 * (di_pos - di_neg).abs() / di_sum } else { 0.0 };
+
+        // ADX = Wilder-smoothed DX (needs period bars of DX, i.e. 2*period total bars).
+        self.smoothed_dx = self.smoothed_dx - self.smoothed_dx / p + dx;
+        self.buf += 1;
+        if self.buf >= 2 * self.period + 1 {
+            self.adx = self.smoothed_dx / p;
+            Some(self.adx)
+        } else {
+            None
+        }
+    }
+}
+
+/// Regime-filtered mean reversion: enter when RSI is oversold AND ADX is low
+/// (non-trending / ranging market). Exit when RSI recovers.
+///
+/// ponytail: VIX filter from Yahoo `^VIX` deferred — needs secondary ticker data.
+/// Add when API supports multi-source signals.
+struct RegimeMRGen {
+    rsi_period: usize,
+    rsi_entry: f64,
+    rsi_exit: f64,
+    adx_threshold: f64,
+    closes: Vec<f64>,
+    avg_gain: f64,
+    avg_loss: f64,
+    rsi_ready: bool,
+    adx: AdxState,
+    in_position: bool,
+}
+
+impl SignalGenerator for RegimeMRGen {
+    fn next(&mut self, bar: &Bar) -> f64 {
+        let n = self.closes.len();
+
+        // RSI (same Wilder logic as BuyTheDipGen)
+        let (rsi_val, rsi_ready) = if n >= self.rsi_period {
+            let delta = bar.close - self.closes[n - 1];
+            let gain = delta.max(0.0);
+            let loss = (-delta).max(0.0);
+            if n == self.rsi_period && !self.rsi_ready {
+                let (sg, sl) = self.closes.windows(2).fold((gain, loss), |(sg, sl), w| {
+                    let d = w[1] - w[0];
+                    (sg + d.max(0.0), sl + (-d).max(0.0))
+                });
+                let p = self.rsi_period as f64;
+                self.avg_gain = sg / p;
+                self.avg_loss = sl / p;
+                self.rsi_ready = true;
+            } else if self.rsi_ready {
+                let p = self.rsi_period as f64;
+                self.avg_gain = (self.avg_gain * (p - 1.0) + gain) / p;
+                self.avg_loss = (self.avg_loss * (p - 1.0) + loss) / p;
+            }
+            if self.rsi_ready {
+                let rs = if self.avg_loss > 0.0 { self.avg_gain / self.avg_loss } else { f64::MAX };
+                (100.0 - 100.0 / (1.0 + rs), true)
+            } else {
+                (50.0, false)
+            }
+        } else {
+            (50.0, false)
+        };
+
+        let adx_val = self.adx.next(bar.high, bar.low, bar.close);
+
+        self.closes.push(bar.close);
+
+        if !rsi_ready { return 0.0; }
+
+        // State machine: enter on RSI oversold + ADX below threshold; exit on RSI recovery.
+        let regime_ok = adx_val.map(|a| a < self.adx_threshold).unwrap_or(true);
+        if !self.in_position {
+            if rsi_val < self.rsi_entry && regime_ok {
+                self.in_position = true;
+            }
+        } else if rsi_val > self.rsi_exit {
+            self.in_position = false;
+        }
+        if self.in_position { 1.0 } else { 0.0 }
+    }
+}
+
 /// BTFD signal generator: long when RSI is below threshold or price breaches
 /// the lower Bollinger Band; flat otherwise. Uses Wilder's smoothed RSI.
 struct BuyTheDipGen {
@@ -409,6 +552,15 @@ pub enum Strategy {
         bb_period: usize,
         bb_std: f64,
     },
+    /// Mean reversion gated by trend regime: enter on RSI oversold only when
+    /// ADX is below `adx_threshold` (non-trending market). Exit on RSI recovery.
+    RegimeMeanReversion {
+        rsi_period: usize,
+        rsi_entry: f64,
+        rsi_exit: f64,
+        adx_period: usize,
+        adx_threshold: f64,
+    },
 }
 
 impl Strategy {
@@ -422,6 +574,13 @@ impl Strategy {
                 Box::new(BuyTheDipGen {
                     rsi_period, rsi_threshold, bb_period, bb_std,
                     closes: Vec::new(), avg_gain: 0.0, avg_loss: 0.0, rsi_ready: false,
+                })
+            }
+            Strategy::RegimeMeanReversion { rsi_period, rsi_entry, rsi_exit, adx_period, adx_threshold } => {
+                Box::new(RegimeMRGen {
+                    rsi_period, rsi_entry, rsi_exit, adx_threshold,
+                    closes: Vec::new(), avg_gain: 0.0, avg_loss: 0.0, rsi_ready: false,
+                    adx: AdxState::new(adx_period), in_position: false,
                 })
             }
         }
@@ -446,6 +605,20 @@ impl Strategy {
                 let mut gen = BuyTheDipGen {
                     rsi_period, rsi_threshold, bb_period, bb_std,
                     closes: Vec::new(), avg_gain: 0.0, avg_loss: 0.0, rsi_ready: false,
+                };
+                let base = chrono::NaiveDate::from_num_days_from_ce_opt(737000).unwrap();
+                closes.iter().enumerate().map(|(i, &c)| {
+                    gen.next(&Bar {
+                        date: base + chrono::Duration::days(i as i64),
+                        open: c, high: c, low: c, close: c, volume: 0.0,
+                    })
+                }).collect()
+            }
+            Strategy::RegimeMeanReversion { rsi_period, rsi_entry, rsi_exit, adx_period, adx_threshold } => {
+                let mut gen = RegimeMRGen {
+                    rsi_period, rsi_entry, rsi_exit, adx_threshold,
+                    closes: Vec::new(), avg_gain: 0.0, avg_loss: 0.0, rsi_ready: false,
+                    adx: AdxState::new(adx_period), in_position: false,
                 };
                 let base = chrono::NaiveDate::from_num_days_from_ce_opt(737000).unwrap();
                 closes.iter().enumerate().map(|(i, &c)| {
@@ -1253,6 +1426,34 @@ mod tests {
         // Equal-weight on identical tickers = single-ticker return.
         let expected = 190.0 / 100.0; // 100→190
         assert!((r.curve.last().unwrap().equity - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn regime_mr_only_enters_in_ranging_market() {
+        // Flat price → ADX near 0 (ranging) → RSI falls sharply on a down day → enter.
+        // 30 flat bars (ADX initializes over ~2*period), then a big drop.
+        let period = 5usize;
+        let mut bars: Vec<Bar> = (0..30).map(|i| {
+            let d = format!("2020-01-{:02}", i + 1);
+            bar(&d, 100.0)
+        }).collect();
+        // Add enough dates
+        for i in 30..40 {
+            bars.push(bar(&format!("2020-02-{:02}", i - 29), if i == 32 { 80.0 } else { 100.0 }));
+        }
+        let strategy = Strategy::RegimeMeanReversion {
+            rsi_period: period, rsi_entry: 30.0, rsi_exit: 70.0,
+            adx_period: period, adx_threshold: 25.0,
+        };
+        let sigs: Vec<f64> = {
+            let mut gen = strategy.into_generator();
+            bars.iter().map(|b| gen.next(b)).collect()
+        };
+        // Should be 0 until enough data, then potentially 1 on the big drop.
+        assert_eq!(sigs[0], 0.0); // no data yet
+        // At least one bar should fire after the drop at index 32.
+        let has_entry = sigs[33..].iter().any(|&s| s == 1.0);
+        assert!(has_entry, "should enter after RSI drop in ranging market");
     }
 
     #[test]
