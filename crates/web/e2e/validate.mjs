@@ -69,6 +69,32 @@ if (entriesShown < 1) fail('pe_min: no entry dates in legend');
 console.log(`OK: local-min entry legend shows ${entriesShown} entry dates`);
 await page.screenshot({ path: `${SHOT}/04-pe-min.png`, fullPage: true });
 
+// --- Step to an older trough; wait for the legend entry dates to actually
+// re-render (the trough label flips on click, before the re-fetch completes,
+// so assert on the legend, not the label). ---
+const legendDates = () =>
+  page.locator('span').filter({ hasText: /from \d{4}-\d\d-\d\d/ }).allInnerTexts().then((a) => a.join('|'));
+const datesBefore = await legendDates();
+const troughLabel = () => page.locator('span').filter({ hasText: /trough \d+ of \d+/ }).first().innerText();
+const labelBefore = await troughLabel();
+await page.getByRole('button', { name: /older/ }).click();
+await page.waitForFunction(
+  (b) => {
+    const cur = [...document.querySelectorAll('span')]
+      .filter((s) => /from \d{4}-\d\d-\d\d/.test(s.textContent))
+      .map((s) => s.textContent)
+      .join('|');
+    return cur && cur !== b;
+  },
+  datesBefore,
+  { timeout: 60000 },
+);
+const labelAfter = await troughLabel();
+if (labelAfter === labelBefore) fail('stepper: trough label did not advance');
+if ((await legendDates()) === datesBefore) fail('stepper: legend entries did not change');
+console.log(`OK: stepped "${labelBefore}" -> "${labelAfter}", entries re-rendered`);
+await page.screenshot({ path: `${SHOT}/05-step.png`, fullPage: true });
+
 if (errors.length) fail('console/page errors: ' + errors.join(' ;; '));
 else console.log('OK: no console/page errors');
 

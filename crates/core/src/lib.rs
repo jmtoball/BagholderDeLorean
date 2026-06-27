@@ -123,6 +123,12 @@ pub struct BacktestResult {
     pub entry_date: Option<NaiveDate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry_pe: Option<f64>,
+    /// Which trough this entered, counting back from most recent (0 = latest).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_index: Option<usize>,
+    /// Total number of P/E troughs available to step through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_count: Option<usize>,
 }
 
 /// Close-to-close simulation. Equity starts at 1.0; each day applies
@@ -151,6 +157,8 @@ pub fn run_backtest(bars: &[Bar], strategy: &Strategy) -> BacktestResult {
         metrics,
         entry_date: None,
         entry_pe: None,
+        entry_index: None,
+        entry_count: None,
     }
 }
 

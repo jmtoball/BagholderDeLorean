@@ -29,10 +29,13 @@ struct BacktestQuery {
     slow: Option<usize>,
     /// Trim to the last N years before running; omitted or 0 = full history.
     years: Option<u32>,
-    /// "pe_min" enters at the most recent local-minimum P/E (overrides `years`).
+    /// "pe_min" enters at a local-minimum P/E (overrides `years`).
     entry: Option<String>,
     /// Trough window for `entry=pe_min`, in trading days (default ~a quarter).
     pe_window: Option<usize>,
+    /// Which trough to enter, counting back from most recent (0 = latest).
+    /// Clamped to the available range.
+    pe_index: Option<usize>,
 }
 
 fn default_strategy() -> String {
@@ -91,16 +94,21 @@ async fn backtest(
     if pe_min {
         let series = pe_series(&bars, &eps);
         let window = q.pe_window.unwrap_or(63);
-        // Most recent confirmed trough -> entry point.
-        let Some(&idx) = local_minima(&series, window).last() else {
+        let minima = local_minima(&series, window);
+        if minima.is_empty() {
             return Err((StatusCode::UNPROCESSABLE_ENTITY,
                 "no P/E history to find a minimum (missing EPS?)".into()));
-        };
-        let (entry_date, entry_pe) = series[idx];
+        }
+        // Step back from the most recent trough; clamp to what's available.
+        let count = minima.len();
+        let k = q.pe_index.unwrap_or(0).min(count - 1);
+        let (entry_date, entry_pe) = series[minima[count - 1 - k]];
         let trimmed: Vec<Bar> = bars.into_iter().filter(|b| b.date >= entry_date).collect();
         let mut result = run_backtest(&trimmed, &strategy);
         result.entry_date = Some(entry_date);
         result.entry_pe = Some(entry_pe);
+        result.entry_index = Some(k);
+        result.entry_count = Some(count);
         Ok(Json(result))
     } else {
         Ok(Json(run_backtest(&trim_years(bars, q.years), &strategy)))

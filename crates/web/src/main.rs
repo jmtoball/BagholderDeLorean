@@ -126,6 +126,7 @@ fn App() -> impl IntoView {
     let selected = create_rw_signal::<HashSet<String>>(HashSet::new());
     let overlay = create_rw_signal::<Vec<(String, BacktestResult)>>(Vec::new());
     let pe_entry = create_rw_signal(false); // enter at each name's local-min P/E
+    let pe_index = create_rw_signal(0usize); // which trough, 0 = most recent
 
     let run_price = move |_| {
         let url = format!(
@@ -154,14 +155,16 @@ fn App() -> impl IntoView {
         });
     };
 
-    let run_selected = move |_| {
+    // Backtest the selected names. With pe_entry on, enter at each name's k-th
+    // trough (0 = most recent); otherwise use the fixed timeframe.
+    let run_selected_k = move |k: usize| {
         let tickers: Vec<String> = selected.get().into_iter().collect();
-        // Either enter at each name's local-min P/E, or use the fixed timeframe.
         let entry = if pe_entry.get() {
-            "&entry=pe_min".to_string()
+            format!("&entry=pe_min&pe_index={k}")
         } else {
             format!("&years={}", years.get())
         };
+        pe_index.set(k);
         busy.set(true);
         spawn_local(async move {
             let mut out = Vec::new();
@@ -303,14 +306,33 @@ fn App() -> impl IntoView {
                                     <tbody>{rows}</tbody>
                                 </table>
                                 <div style="margin-top:.5rem;display:flex;gap:.75rem;align-items:center">
-                                    <button on:click=run_selected prop:disabled=move || busy.get()>"Backtest selected"</button>
-                                    <label title="Start each backtest at that name's most recent local-minimum P/E instead of the fixed timeframe">
+                                    <button on:click=move |_| run_selected_k(0) prop:disabled=move || busy.get()>"Backtest selected"</button>
+                                    <label title="Start each backtest at a local-minimum P/E instead of the fixed timeframe; step through troughs below">
                                         <input type="checkbox" prop:checked=pe_entry
                                             on:change=move |e| pe_entry.set(event_target_checked(&e)) />
                                         " enter at local-min P/E"
                                     </label>
                                 </div>
                             }.into_view()
+                        }
+                    }}
+                    // Step through troughs: ◀ newer / older ▶ (only in pe_min mode)
+                    {move || {
+                        let maxn = overlay.get().iter().filter_map(|(_, r)| r.entry_count).max();
+                        match (pe_entry.get(), maxn) {
+                            (true, Some(n)) if n > 1 => {
+                                let k = pe_index.get();
+                                Some(view! {
+                                    <div style="margin-top:.5rem;display:flex;gap:.5rem;align-items:center">
+                                        <button prop:disabled=move || busy.get() || pe_index.get() == 0
+                                            on:click=move |_| run_selected_k(pe_index.get().saturating_sub(1))>"◀ newer"</button>
+                                        <span>{format!("trough {} of {} (0 = most recent)", k + 1, n)}</span>
+                                        <button prop:disabled=move || busy.get() || (pe_index.get() + 1 >= n)
+                                            on:click=move |_| run_selected_k(pe_index.get() + 1)>"older ▶"</button>
+                                    </div>
+                                })
+                            }
+                            _ => None,
                         }
                     }}
                     {move || { let o = overlay.get(); (!o.is_empty()).then(|| equity_overlay(&o)) }}
