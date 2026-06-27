@@ -125,6 +125,37 @@ fn parse_yahoo_chart(body: &str) -> Result<Vec<Bar>> {
     Ok(bars)
 }
 
+// --- FRED macro series -------------------------------------------------------
+
+/// Download a FRED time-series via the public CSV endpoint (no API key).
+/// `series_id` is e.g. "T10Y2Y", "CPIAUCSL". Missing observations (`.`) are dropped.
+pub fn download_fred_series(series_id: &str) -> Result<Vec<(NaiveDate, f64)>> {
+    let url = format!("https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}");
+    let body = reqwest::blocking::Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; BagholderDeLorean/0.1)")
+        .build()?
+        .get(&url)
+        .send()
+        .with_context(|| format!("requesting FRED series {series_id}"))?
+        .error_for_status()?
+        .text()?;
+    parse_fred_csv(&body)
+}
+
+fn parse_fred_csv(body: &str) -> Result<Vec<(NaiveDate, f64)>> {
+    let mut rows = Vec::new();
+    for line in body.lines().skip(1) {
+        let mut it = line.splitn(2, ',');
+        let date_str = it.next().unwrap_or("").trim();
+        let val_str = it.next().unwrap_or("").trim();
+        if val_str == "." || val_str.is_empty() || date_str.is_empty() { continue; }
+        let date: NaiveDate = date_str.parse().with_context(|| format!("bad FRED date: {date_str}"))?;
+        let val: f64 = val_str.parse().with_context(|| format!("bad FRED value: {val_str}"))?;
+        rows.push((date, val));
+    }
+    Ok(rows)
+}
+
 // --- SEC EDGAR fundamentals --------------------------------------------------
 
 // SEC requires a descriptive User-Agent with contact info, else it 403s.

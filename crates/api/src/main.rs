@@ -10,9 +10,9 @@ use axum::{
     Json, Router,
 };
 use bagholder_core::{
-    inverse_vol_alloc, local_minima, momentum_alloc, pairs_alloc, pe_history, pe_series,
-    run_multi_asset_backtest, run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate,
-    FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy, SECTOR_ETFS,
+    econ_cycle_alloc, inverse_vol_alloc, local_minima, momentum_alloc, pairs_alloc, pe_history,
+    pe_series, run_multi_asset_backtest, run_portfolio_backtest, Bar, BacktestResult, BandConfig,
+    Candidate, FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy, SECTOR_ETFS,
 };
 use std::collections::HashMap;
 use bagholder_data::Store;
@@ -263,6 +263,42 @@ async fn preset_backtest(
             &bars_by_ticker,
             move |history, _| pairs_alloc(history, &ta2, &tb2, win, entry_z),
             &cfg, 10_000.0, &FillCosts::ZERO, 0.0,
+        );
+        return Ok(Json(result));
+    }
+
+    // Economic-cycle rotation needs FRED data — handle early.
+    if q.kind == "econ_cycle" {
+        let ticker_list: Vec<String> = SECTOR_ETFS.iter().map(|s| s.to_string()).collect();
+        let rebalance_config = RebalanceConfig {
+            calendar_days: Some(q.rebalance_days.unwrap_or(30)),
+            bands: Some(BandConfig { absolute: 0.05, relative: 0.25 }),
+            full: true,
+        };
+        let (bars_by_ticker, t10y2y) = tokio::task::spawn_blocking(move || {
+            let db = db.lock().unwrap();
+            let bars = ticker_list.iter()
+                .map(|t| Ok::<_, anyhow::Error>((t.clone(), db.ohlcv(t)?)))
+                .collect::<Result<HashMap<_, _>, _>>()?;
+            let macro_data = db.macro_series("T10Y2Y")?;
+            Ok::<_, anyhow::Error>((bars, macro_data))
+        }).await.map_err(internal)?.map_err(internal)?;
+
+        let result = run_multi_asset_backtest(
+            &bars_by_ticker,
+            move |history, _| {
+                let current_date = history.values()
+                    .filter_map(|bars| bars.last().map(|b| b.date))
+                    .max();
+                let spread = current_date.and_then(|d| {
+                    t10y2y.iter().filter(|(td, _)| *td <= d).last().map(|(_, v)| *v)
+                });
+                econ_cycle_alloc(history, spread)
+            },
+            &rebalance_config,
+            10_000.0,
+            &FillCosts::ZERO,
+            0.0,
         );
         return Ok(Json(result));
     }

@@ -750,6 +750,35 @@ pub fn pairs_alloc(
     }
 }
 
+/// Sector allocation driven by the yield-curve regime (T10Y2Y spread):
+/// - Inverted (< 0): defensive tilt — XLP, XLU, XLV
+/// - Steep (> 0.5): growth tilt — XLK, XLF, XLI, XLY
+/// - Flat / unknown: equal-weight all tickers in `bars_to_date`
+///
+/// `t10y2y` is the current T10Y2Y value (None = no macro data yet).
+pub fn econ_cycle_alloc(
+    bars_to_date: &HashMap<String, &[Bar]>,
+    t10y2y: Option<f64>,
+) -> Allocation {
+    match t10y2y {
+        Some(s) if s < 0.0 => {
+            let ts = ["XLP", "XLU", "XLV"];
+            let w = 1.0 / ts.len() as f64;
+            Allocation(ts.iter().map(|&t| (t.to_owned(), w)).collect())
+        }
+        Some(s) if s > 0.5 => {
+            let ts = ["XLK", "XLF", "XLI", "XLY"];
+            let w = 1.0 / ts.len() as f64;
+            Allocation(ts.iter().map(|&t| (t.to_owned(), w)).collect())
+        }
+        _ => {
+            let n = bars_to_date.len().max(1);
+            let w = 1.0 / n as f64;
+            Allocation(bars_to_date.keys().map(|t| (t.clone(), w)).collect())
+        }
+    }
+}
+
 /// Multi-asset event-driven backtest. Bars for each ticker are date-aligned
 /// to their intersection; `alloc_fn` is called each bar with history up to
 /// (inclusive) that bar and the current date index.
@@ -1452,6 +1481,20 @@ mod tests {
         p.fill("X", 3.0, 100.0, d); // buy 3
         p.fill("X", -5.0, 100.0, d); // sell 5 (close 3, open short 2)
         assert!((p.shares("X") - (-2.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn econ_cycle_alloc_regime_tilt() {
+        let history: HashMap<String, &[Bar]> = HashMap::new(); // empty — regime derives from macro only
+        let defensive = econ_cycle_alloc(&history, Some(-0.5));
+        assert!(defensive.0.contains_key("XLP"), "inverted curve → XLP");
+        assert!(!defensive.0.contains_key("XLK"), "inverted curve → no XLK");
+        let growth = econ_cycle_alloc(&history, Some(1.0));
+        assert!(growth.0.contains_key("XLK"), "steep curve → XLK");
+        assert!(!growth.0.contains_key("XLP"), "steep curve → no XLP");
+        // No data → equal weight across whatever's in bars_to_date (empty here → empty alloc).
+        let flat = econ_cycle_alloc(&history, None);
+        assert!(flat.0.is_empty());
     }
 
     #[test]

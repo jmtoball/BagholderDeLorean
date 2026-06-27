@@ -2,9 +2,10 @@
 //! SQL, fast range scans for backtests. OHLCV is a wide table; fundamentals is
 //! tall (`ticker, period, metric, value`) so the metric set stays open-ended.
 
-use crate::{download_cik_map, download_fundamentals, download_ohlcv};
+use crate::{download_cik_map, download_fred_series, download_fundamentals, download_ohlcv};
 use anyhow::{Context, Result};
 use bagholder_core::{Bar, Fundamental};
+use chrono::NaiveDate;
 use duckdb::{params, Connection};
 
 const SCHEMA: &str = "
@@ -25,6 +26,12 @@ CREATE TABLE IF NOT EXISTS fundamentals (
 CREATE TABLE IF NOT EXISTS cik_map (
   ticker TEXT   PRIMARY KEY,
   cik    BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS macro_series (
+  series_id TEXT NOT NULL,
+  date      DATE NOT NULL,
+  value     DOUBLE,
+  PRIMARY KEY (series_id, date)
 );
 ";
 
@@ -192,6 +199,31 @@ impl Store {
         }
         self.conn.execute_batch("COMMIT")?;
         Ok(())
+    }
+
+    /// Cached FRED macro series (e.g. "T10Y2Y", "CPIAUCSL").
+    /// Downloads on first access; ponytail: cache-forever like OHLCV.
+    pub fn macro_series(&self, series_id: &str) -> Result<Vec<(NaiveDate, f64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT date, value FROM macro_series WHERE series_id = ? ORDER BY date")?;
+        let cached: Vec<(NaiveDate, f64)> = stmt
+            .query_map([series_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        if !cached.is_empty() { return Ok(cached); }
+
+        let rows = download_fred_series(series_id)?;
+        self.conn.execute_batch("BEGIN")?;
+        {
+            let mut ins = self
+                .conn
+                .prepare("INSERT OR REPLACE INTO macro_series VALUES (?, ?, ?)")?;
+            for (date, val) in &rows {
+                ins.execute(params![series_id, date, val])?;
+            }
+        }
+        self.conn.execute_batch("COMMIT")?;
+        Ok(rows)
     }
 }
 
