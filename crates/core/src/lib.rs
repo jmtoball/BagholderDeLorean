@@ -459,6 +459,105 @@ impl Strategy {
     }
 }
 
+/// Inverse-volatility allocation across tickers. Each ticker's weight is
+/// proportional to `1 / rolling_stddev(returns, window)`. Equal-weights any
+/// ticker whose trailing vol is zero.
+///
+/// `bars_to_date` maps ticker → slice of bars up to and including today.
+pub fn inverse_vol_alloc(bars_to_date: &HashMap<String, &[Bar]>, window: usize) -> Allocation {
+    let inv: HashMap<String, f64> = bars_to_date.iter().filter_map(|(ticker, bars)| {
+        if bars.len() < 2 { return None; }
+        let start = bars.len().saturating_sub(window + 1);
+        let rets: Vec<f64> = bars[start..].windows(2)
+            .map(|w| w[1].close / w[0].close - 1.0)
+            .collect();
+        if rets.is_empty() { return None; }
+        let n = rets.len() as f64;
+        let mean = rets.iter().sum::<f64>() / n;
+        let vol = (rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n).sqrt();
+        if vol > 0.0 { Some((ticker.clone(), 1.0 / vol)) } else { None }
+    }).collect();
+
+    if inv.is_empty() {
+        // Not enough data yet: equal weight everything.
+        let w = 1.0 / bars_to_date.len() as f64;
+        return Allocation(bars_to_date.keys().map(|t| (t.clone(), w)).collect());
+    }
+    Allocation(inv).normalize()
+}
+
+/// Multi-asset event-driven backtest. Bars for each ticker are date-aligned
+/// to their intersection; `alloc_fn` is called each bar with history up to
+/// (inclusive) that bar and the current date index.
+///
+/// Rebalances whenever `needs_rebalance` fires; force-rebalances at bar 0.
+/// `rfr_daily` accrues on positive cash each bar (skipped at bar 0).
+pub fn run_multi_asset_backtest(
+    bars_by_ticker: &HashMap<String, Vec<Bar>>,
+    alloc_fn: impl Fn(&HashMap<String, &[Bar]>, usize) -> Allocation,
+    rebalance_config: &RebalanceConfig,
+    initial_cash: f64,
+    costs: &FillCosts,
+    rfr_daily: f64,
+) -> BacktestResult {
+    // Intersection of dates across all tickers.
+    let common_dates: Vec<NaiveDate> = {
+        let mut iter = bars_by_ticker.values();
+        let first = match iter.next() {
+            Some(b) => b.iter().map(|b| b.date).collect::<std::collections::HashSet<_>>(),
+            None => return BacktestResult {
+                curve: vec![],
+                metrics: compute_metrics(&[], &[]),
+                positions: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
+            },
+        };
+        let common = iter.fold(first, |acc, bars| {
+            let set: std::collections::HashSet<_> = bars.iter().map(|b| b.date).collect();
+            acc.into_iter().filter(|d| set.contains(d)).collect()
+        });
+        let mut v: Vec<_> = common.into_iter().collect();
+        v.sort();
+        v
+    };
+
+    // Pre-build date→index maps for fast bar lookup.
+    let index_maps: HashMap<String, HashMap<NaiveDate, usize>> = bars_by_ticker.iter()
+        .map(|(t, bars)| (t.clone(), bars.iter().enumerate().map(|(i, b)| (b.date, i)).collect()))
+        .collect();
+
+    let mut portfolio = Portfolio::new(initial_cash);
+    let mut curve = Vec::with_capacity(common_dates.len());
+    let mut last_rebalance = *common_dates.first().unwrap_or(&NaiveDate::MIN);
+
+    for (ci, &date) in common_dates.iter().enumerate() {
+        if ci > 0 && rfr_daily != 0.0 {
+            portfolio.cash += portfolio.cash.max(0.0) * rfr_daily;
+        }
+
+        // Current prices and history slices.
+        let prices: HashMap<String, f64> = bars_by_ticker.iter().filter_map(|(t, bars)| {
+            index_maps[t].get(&date).map(|&i| (t.clone(), bars[i].close))
+        }).collect();
+        let history: HashMap<String, &[Bar]> = bars_by_ticker.iter().filter_map(|(t, bars)| {
+            index_maps[t].get(&date).map(|&i| (t.clone(), &bars[..=i]))
+        }).collect();
+
+        let eq = portfolio.equity(&prices);
+        curve.push(EquityPoint { date, equity: eq / initial_cash });
+
+        let alloc = alloc_fn(&history, ci);
+        if ci == 0 || needs_rebalance(&portfolio, &alloc, &prices, rebalance_config, last_rebalance, date) {
+            portfolio.rebalance(&alloc, &prices, date, costs);
+            last_rebalance = date;
+        }
+    }
+
+    let rets: Vec<f64> = curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect();
+    let metrics = compute_metrics(&curve, &rets);
+    // ponytail: positions left empty for multi-asset; add per-ticker summary when UI needs it.
+    BacktestResult { curve, metrics, positions: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None }
+}
+
 /// 20-day trailing average daily volume at bar index `i` (excludes bar `i`).
 /// ponytail: O(window) per call — fine for w=20; use a running sum if window grows large.
 fn rolling_adv(bars: &[Bar], i: usize, window: usize) -> f64 {
@@ -1065,6 +1164,42 @@ mod tests {
         p.fill("AAPL", -7.0, 130.0, d3);
         assert!((p.realized_pnl - 190.0).abs() < 1e-9);
         assert!((p.shares("AAPL") - 3.0).abs() < 1e-9); // 3 remain from lot 2
+    }
+
+    #[test]
+    fn inverse_vol_alloc_weights_by_inverse_vol() {
+        // Low-vol ticker (small moves) → higher weight than high-vol ticker.
+        let bars_lo: Vec<Bar> = (0..25).map(|i| bar(&format!("2020-01-{:02}", i + 1), 100.0 + (i % 2) as f64)).collect();
+        let bars_hi: Vec<Bar> = (0..25).map(|i| bar(&format!("2020-01-{:02}", i + 1), 100.0 + (i % 2) as f64 * 10.0)).collect();
+        let history = HashMap::from([
+            ("LO".to_string(), bars_lo.as_slice()),
+            ("HI".to_string(), bars_hi.as_slice()),
+        ]);
+        let alloc = inverse_vol_alloc(&history, 20);
+        assert!(alloc.0["LO"] > alloc.0["HI"], "low-vol ticker should have higher weight");
+        let total: f64 = alloc.0.values().sum();
+        assert!((total - 1.0).abs() < 1e-9, "weights must sum to 1");
+    }
+
+    #[test]
+    fn multi_asset_backtest_runs_and_rebalances() {
+        // Two tickers moving in sync: equal-weight buy-and-hold should track either ticker.
+        let bars_a: Vec<Bar> = (0..10).map(|i| bar(&format!("2020-01-{:02}", i + 1), 100.0 + i as f64 * 10.0)).collect();
+        let bars_b: Vec<Bar> = (0..10).map(|i| bar(&format!("2020-01-{:02}", i + 1), 100.0 + i as f64 * 10.0)).collect();
+        let universe = HashMap::from([
+            ("A".to_string(), bars_a),
+            ("B".to_string(), bars_b),
+        ]);
+        let cfg = RebalanceConfig { calendar_days: Some(9999), bands: None, full: true };
+        let r = run_multi_asset_backtest(
+            &universe,
+            |_, _| Allocation(HashMap::from([("A".to_string(), 0.5), ("B".to_string(), 0.5)])),
+            &cfg, 10_000.0, &FillCosts::ZERO, 0.0,
+        );
+        assert_eq!(r.curve.len(), 10);
+        // Equal-weight on identical tickers = single-ticker return.
+        let expected = 190.0 / 100.0; // 100→190
+        assert!((r.curve.last().unwrap().equity - expected).abs() < 1e-6);
     }
 
     #[test]

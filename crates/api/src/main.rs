@@ -10,9 +10,11 @@ use axum::{
     Json, Router,
 };
 use bagholder_core::{
-    local_minima, pe_history, pe_series, run_portfolio_backtest, Bar, BacktestResult, Candidate,
-    FillCosts, Fundamental, PeHistory, Strategy,
+    inverse_vol_alloc, local_minima, pe_history, pe_series, run_multi_asset_backtest,
+    run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate, FillCosts,
+    Fundamental, PeHistory, RebalanceConfig, Strategy,
 };
+use std::collections::HashMap;
 use bagholder_data::Store;
 use serde::Deserialize;
 use tower_http::{cors::CorsLayer, services::ServeDir};
@@ -205,6 +207,60 @@ async fn screen(
     Ok(Json(candidates))
 }
 
+/// Multi-asset preset backtests: `GET /api/preset?kind=risk_parity&tickers=SPY,QQQ,GLD`
+///
+/// Currently supported: `kind=risk_parity` (inverse-volatility weights, monthly rebalance).
+/// Returns a single aggregate `BacktestResult` (one equity curve for the whole portfolio).
+#[derive(Deserialize)]
+struct PresetQuery {
+    kind: String,
+    /// Comma-separated Yahoo tickers. Defaults to SPY,QQQ,GLD,TLT,IEF if omitted.
+    tickers: Option<String>,
+    /// Trailing window for vol estimate in trading days (default 20).
+    vol_window: Option<usize>,
+    /// Calendar rebalance interval in days (default 30).
+    rebalance_days: Option<u32>,
+}
+
+async fn preset_backtest(
+    State(db): State<Db>,
+    Query(q): Query<PresetQuery>,
+) -> Result<Json<BacktestResult>, (StatusCode, String)> {
+    if q.kind != "risk_parity" {
+        return Err((StatusCode::BAD_REQUEST, format!("unknown preset: {}", q.kind)));
+    }
+
+    let ticker_list: Vec<String> = q.tickers
+        .as_deref()
+        .unwrap_or("SPY,QQQ,GLD,TLT,IEF")
+        .split(',')
+        .map(|s| s.trim().to_uppercase())
+        .collect();
+    let vol_window = q.vol_window.unwrap_or(20);
+    let rebalance_config = RebalanceConfig {
+        calendar_days: Some(q.rebalance_days.unwrap_or(30)),
+        bands: Some(BandConfig { absolute: 0.05, relative: 0.25 }),
+        full: true,
+    };
+
+    let bars_by_ticker: HashMap<String, Vec<Bar>> = tokio::task::spawn_blocking(move || {
+        let db = db.lock().unwrap();
+        ticker_list.iter()
+            .map(|t| Ok::<_, anyhow::Error>((t.clone(), db.ohlcv(t)?)))
+            .collect::<Result<HashMap<_, _>, _>>()
+    }).await.map_err(internal)?.map_err(internal)?;
+
+    let result = run_multi_asset_backtest(
+        &bars_by_ticker,
+        move |history, _i| inverse_vol_alloc(history, vol_window),
+        &rebalance_config,
+        10_000.0,
+        &FillCosts::ZERO,
+        0.0,
+    );
+    Ok(Json(result))
+}
+
 fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
@@ -217,6 +273,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/api/backtest", get(backtest))
+        .route("/api/preset", get(preset_backtest))
         .route("/api/fundamentals", get(fundamentals))
         .route("/api/pe_history", get(pe_history_handler))
         .route("/api/screen", get(screen))
