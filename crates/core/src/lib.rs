@@ -121,17 +121,18 @@ impl Portfolio {
     }
 
     /// Resolve an order to a fill and apply it, deducting `costs` from cash.
-    pub fn execute(&mut self, order: &Order, price: f64, date: NaiveDate, costs: &FillCosts) {
+    /// `adv` = average daily volume in shares (pass 0.0 when market_impact is 0).
+    pub fn execute(&mut self, order: &Order, price: f64, date: NaiveDate, costs: &FillCosts, adv: f64) {
         match order {
             Order::Market { ticker, qty } => {
-                self.cash -= costs.total(*qty, price);
+                self.cash -= costs.total(*qty, price, adv);
                 self.fill(ticker, *qty, price, date);
             }
             Order::TargetWeight { ticker, weight } => {
                 let equity = self.cash + self.shares(ticker) * price;
                 let delta = weight * equity / price - self.shares(ticker);
                 if delta.abs() > 1e-10 {
-                    self.cash -= costs.total(delta, price);
+                    self.cash -= costs.total(delta, price, adv);
                     self.fill(ticker, delta, price, date);
                 }
             }
@@ -150,20 +151,33 @@ impl Portfolio {
     }
 }
 
-/// Per-fill transaction costs: flat commission + proportional bid-ask spread.
+/// Per-fill transaction costs: flat commission, proportional spread, and
+/// square-root market impact (Almgren-Chriss model).
 #[derive(Clone, Debug)]
 pub struct FillCosts {
     /// Flat commission per order (same currency as portfolio cash).
     pub commission: f64,
     /// One-way spread cost as a fraction of notional (e.g. 0.0001 = 1 bp).
     pub spread_fraction: f64,
+    /// Almgren-Chriss market-impact coefficient σ:
+    ///   impact = σ × √(|qty| / adv) × price.
+    /// 0.0 disables impact. Typical values: 0.1–1.0 depending on liquidity.
+    pub market_impact: f64,
 }
 
 impl FillCosts {
-    pub const ZERO: Self = Self { commission: 0.0, spread_fraction: 0.0 };
+    pub const ZERO: Self = Self { commission: 0.0, spread_fraction: 0.0, market_impact: 0.0 };
 
-    fn total(&self, qty: f64, price: f64) -> f64 {
-        self.commission + self.spread_fraction * qty.abs() * price
+    /// Total cost for a fill. `adv` = average daily volume in shares; only
+    /// used when `market_impact > 0`.
+    fn total(&self, qty: f64, price: f64, adv: f64) -> f64 {
+        let flat = self.commission + self.spread_fraction * qty.abs() * price;
+        let impact = if self.market_impact > 0.0 && adv > 0.0 {
+            self.market_impact * (qty.abs() / adv).sqrt() * price
+        } else {
+            0.0
+        };
+        flat + impact
     }
 }
 
@@ -238,6 +252,15 @@ impl Strategy {
             }
         }
     }
+}
+
+/// 20-day trailing average daily volume at bar index `i` (excludes bar `i`).
+/// ponytail: O(window) per call — fine for w=20; use a running sum if window grows large.
+fn rolling_adv(bars: &[Bar], i: usize, window: usize) -> f64 {
+    let start = i.saturating_sub(window);
+    let n = i - start;
+    if n == 0 { return bars.get(i).map(|b| b.volume).unwrap_or(1.0); }
+    bars[start..i].iter().map(|b| b.volume).sum::<f64>() / n as f64
 }
 
 /// Rolling simple moving average; `None` until the window fills. O(n).
@@ -351,18 +374,20 @@ pub fn run_portfolio_backtest(
     let mut portfolio = Portfolio::new(initial_cash);
     let mut curve = Vec::with_capacity(bars.len());
 
-    for bar in bars {
+    for (i, bar) in bars.iter().enumerate() {
         // Mark-to-market BEFORE rebalance — today's equity reflects yesterday's position.
         let eq = portfolio.cash + portfolio.shares(ticker) * bar.close;
         curve.push(EquityPoint { date: bar.date, equity: eq / initial_cash });
 
         // Signal uses only data through this bar; fills at close, earns next bar's return.
         let weight = gen.next(bar);
+        let adv = rolling_adv(bars, i, 20);
         portfolio.execute(
             &Order::TargetWeight { ticker: ticker.to_owned(), weight },
             bar.close,
             bar.date,
             costs,
+            adv,
         );
     }
 
@@ -596,10 +621,10 @@ mod tests {
     fn order_market_buy_and_sell() {
         let d: NaiveDate = "2024-01-01".parse().unwrap();
         let mut p = Portfolio::new(1000.0);
-        p.execute(&Order::Market { ticker: "X".into(), qty: 5.0 }, 100.0, d, &FillCosts::ZERO);
+        p.execute(&Order::Market { ticker: "X".into(), qty: 5.0 }, 100.0, d, &FillCosts::ZERO, 0.0);
         assert!((p.shares("X") - 5.0).abs() < 1e-9);
         assert!((p.cash - 500.0).abs() < 1e-9);
-        p.execute(&Order::Market { ticker: "X".into(), qty: -5.0 }, 120.0, d, &FillCosts::ZERO);
+        p.execute(&Order::Market { ticker: "X".into(), qty: -5.0 }, 120.0, d, &FillCosts::ZERO, 0.0);
         assert!(p.shares("X").abs() < 1e-9);
         assert!((p.realized_pnl - 100.0).abs() < 1e-9); // 5 * (120 - 100)
     }
@@ -608,11 +633,11 @@ mod tests {
     fn order_target_weight_allocates_full_equity() {
         let d: NaiveDate = "2024-01-01".parse().unwrap();
         let mut p = Portfolio::new(1000.0);
-        p.execute(&Order::TargetWeight { ticker: "X".into(), weight: 1.0 }, 50.0, d, &FillCosts::ZERO);
+        p.execute(&Order::TargetWeight { ticker: "X".into(), weight: 1.0 }, 50.0, d, &FillCosts::ZERO, 0.0);
         assert!((p.shares("X") - 20.0).abs() < 1e-9); // 1000 / 50
         assert!(p.cash.abs() < 1e-9);
         // reduce to 50% weight at new price
-        p.execute(&Order::TargetWeight { ticker: "X".into(), weight: 0.5 }, 50.0, d, &FillCosts::ZERO);
+        p.execute(&Order::TargetWeight { ticker: "X".into(), weight: 0.5 }, 50.0, d, &FillCosts::ZERO, 0.0);
         assert!((p.shares("X") - 10.0).abs() < 1e-9);
     }
 
@@ -620,7 +645,7 @@ mod tests {
     fn flat_commission_reduces_equity() {
         // Buy 10 shares @ 100 costs $10 commission → cash = -10, equity at bar 1 = 990/1000.
         let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 100.0)];
-        let costs = FillCosts { commission: 10.0, spread_fraction: 0.0 };
+        let costs = FillCosts { commission: 10.0, spread_fraction: 0.0, market_impact: 0.0 };
         let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs);
         assert!((r.curve.last().unwrap().equity - 0.99).abs() < 1e-9);
     }
@@ -629,9 +654,26 @@ mod tests {
     fn spread_fraction_reduces_equity() {
         // 1% spread on 10 shares @ 100 = $10 → same result as commission test.
         let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 100.0)];
-        let costs = FillCosts { commission: 0.0, spread_fraction: 0.01 };
+        let costs = FillCosts { commission: 0.0, spread_fraction: 0.01, market_impact: 0.0 };
         let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs);
         assert!((r.curve.last().unwrap().equity - 0.99).abs() < 1e-9);
+    }
+
+    #[test]
+    fn market_impact_penalizes_large_orders() {
+        // With σ=1.0 and ADV=100 shares, buying 100 shares costs 1.0 * sqrt(100/100) * price = price.
+        // Buying 25 shares costs 1.0 * sqrt(25/100) * price = 0.5 * price.
+        // So large order (relative to ADV) costs more impact per share.
+        let d: NaiveDate = "2024-01-01".parse().unwrap();
+        let costs = FillCosts { commission: 0.0, spread_fraction: 0.0, market_impact: 1.0 };
+        // 100 shares @ price 1.0, ADV=100 → impact = 1.0 * sqrt(1.0) * 1.0 = 1.0
+        let impact_large = costs.total(100.0, 1.0, 100.0);
+        // 25 shares @ price 1.0, ADV=100 → impact = 1.0 * sqrt(0.25) * 1.0 = 0.5
+        let impact_small = costs.total(25.0, 1.0, 100.0);
+        assert!(impact_large > impact_small);
+        assert!((impact_large - 1.0).abs() < 1e-9);
+        assert!((impact_small - 0.5).abs() < 1e-9);
+        let _ = d; // suppress unused warning
     }
 
     #[test]
