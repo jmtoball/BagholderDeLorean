@@ -33,11 +33,11 @@ For the full stack locally: `cargo run -p bagholder-api` in one terminal, `trunk
 Four crates, dependency-ordered so the compute core stays portable:
 
 - **`core`** (`bagholder-core`) — the backtest engine. Pure compute, no I/O. Deps limited to `serde`/`chrono` *on purpose*: it compiles to WASM so the `web` crate reuses its DTOs (`Bar`, `BacktestResult`, `Strategy`), making API responses deserialize into the same typed structs the engine produced. **Do not add I/O or native-only deps here** — it would break the wasm build of `web`.
-- **`data`** (`bagholder-data`) — historic data clients (blocking I/O). OHLCV via Stooq free CSV (no API key; ticker format `AAPL.US`). Fundamentals/earnings is a stub (`fetch_fundamentals`) — wire to SEC EDGAR or Yahoo quoteSummary when needed. Depends on `core` for `Bar`. **Never make this a dependency of `web`** (pulls native TLS).
-- **`api`** (`bagholder-api`) — axum server. `GET /api/backtest` fetches data + runs the engine; also serves `crates/web/dist`. Blocking data calls go through `tokio::task::spawn_blocking` — keep them off the async runtime's worker threads.
+- **`data`** (`bagholder-data`) — historic data clients + a **DuckDB cache** (`Store`, `crates/data/src/store.rs`). `Store::ohlcv(ticker)` serves cached bars or downloads from Stooq (`download_ohlcv`, free, no key, ticker format `AAPL.US`) and caches them. DuckDB is embedded (single `bagholder.duckdb` file) and columnar — fast range scans for backtests, SQL joins for fundamentals later. Schema: `bars` is wide (`ticker,date,o,h,l,c,v`); `fundamentals` is tall (`ticker,period,metric,value`) so the metric set stays open-ended. Fundamentals fetching is still a stub (`fetch_fundamentals`) — wire to SEC EDGAR or Yahoo quoteSummary. **First build is slow** (DuckDB compiles a bundled C++ lib). Depends on `core` for `Bar`. **Never make this a dependency of `web`** (pulls native TLS + DuckDB).
+- **`api`** (`bagholder-api`) — axum server. Holds the `Store` behind `Arc<Mutex<>>` (one global lock — fine for single-user dev). `GET /api/backtest` loads cached data + runs the engine; also serves `crates/web/dist`. Blocking DB/network calls go through `tokio::task::spawn_blocking` — keep them off the async runtime's worker threads.
 - **`web`** (`bagholder-web`) — Leptos CSR one-pager. Form → fetch `/api/backtest` → metrics + inline-SVG equity curve. No charting dependency by design.
 
-Data flow: `web` form → `api/backtest` → `data::fetch_ohlcv` → `core::run_backtest` → JSON `BacktestResult` → `web` renders.
+Data flow: `web` form → `api/backtest` → `data::Store::ohlcv` (DuckDB cache → Stooq on miss) → `core::run_backtest` → JSON `BacktestResult` → `web` renders.
 
 ### Conventions that matter
 

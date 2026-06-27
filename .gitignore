@@ -1,4 +1,6 @@
 /target
 crates/web/dist
+*.duckdb
+*.duckdb.wal
 **/*.rs.bk
 .DS_Store

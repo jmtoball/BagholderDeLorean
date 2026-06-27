@@ -1,14 +1,19 @@
-//! Historic data clients. Blocking I/O — the API crate calls these off the
-//! async runtime via `spawn_blocking`. Kept out of the WASM web crate.
+//! Historic data clients + a DuckDB-backed cache (`Store`). Blocking I/O — the
+//! API crate calls these off the async runtime via `spawn_blocking`. Kept out
+//! of the WASM web crate.
+
+mod store;
+pub use store::Store;
 
 use anyhow::{Context, Result};
 use bagholder_core::Bar;
 use chrono::NaiveDate;
 use serde::Deserialize;
 
-/// Daily OHLCV from Stooq (free, no API key). Ticker uses Stooq's suffix
-/// format, e.g. "AAPL.US", "SPY.US", "BMW.DE".
-pub fn fetch_ohlcv(ticker: &str) -> Result<Vec<Bar>> {
+/// Daily OHLCV straight from Stooq (free, no API key). Ticker uses Stooq's
+/// suffix format, e.g. "AAPL.US", "SPY.US", "BMW.DE". Prefer `Store::ohlcv`,
+/// which caches these results; this is the raw network fetch.
+pub fn download_ohlcv(ticker: &str) -> Result<Vec<Bar>> {
     let url = format!("https://stooq.com/q/d/l/?s={ticker}&i=d");
     let body = reqwest::blocking::get(&url)
         .with_context(|| format!("requesting {url}"))?
