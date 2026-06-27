@@ -9,7 +9,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use bagholder_core::{run_backtest, BacktestResult, Strategy};
+use bagholder_core::{run_backtest, BacktestResult, Fundamental, Strategy};
 use bagholder_data::Store;
 use serde::Deserialize;
 use tower_http::{cors::CorsLayer, services::ServeDir};
@@ -53,6 +53,23 @@ async fn backtest(
     Ok(Json(run_backtest(&bars, &strategy)))
 }
 
+#[derive(Deserialize)]
+struct TickerQuery {
+    ticker: String,
+}
+
+async fn fundamentals(
+    State(db): State<Db>,
+    Query(q): Query<TickerQuery>,
+) -> Result<Json<Vec<Fundamental>>, (StatusCode, String)> {
+    let ticker = q.ticker.clone();
+    let funds = tokio::task::spawn_blocking(move || db.lock().unwrap().fundamentals(&ticker))
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+    Ok(Json(funds))
+}
+
 fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
@@ -65,6 +82,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/api/backtest", get(backtest))
+        .route("/api/fundamentals", get(fundamentals))
         // Serve the trunk-built frontend. Run `trunk build` in crates/web first.
         .fallback_service(ServeDir::new("crates/web/dist"))
         .layer(CorsLayer::permissive())

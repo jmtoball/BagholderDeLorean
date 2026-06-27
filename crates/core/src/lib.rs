@@ -15,6 +15,19 @@ pub struct Bar {
     pub volume: f64,
 }
 
+/// A single fundamental fact for one reporting period (tall layout — see the
+/// `fundamentals` table). `metric` is a canonical name like "revenue" or
+/// "eps_basic"; `period` is the statement end date; `period_type` is "Q"
+/// (quarterly) or "FY" (annual) — income-statement facts report both, so this
+/// is needed to tell a quarter's revenue from the full year's.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Fundamental {
+    pub period: NaiveDate,
+    pub metric: String,
+    pub period_type: String,
+    pub value: f64,
+}
+
 /// Built-in strategies. An enum (not a trait) so the web form can serialize a
 /// choice directly. ponytail: swap to a `trait Strategy` + registry only when
 /// users need to plug in their own.
