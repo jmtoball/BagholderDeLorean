@@ -486,16 +486,24 @@ pub fn run_portfolio_backtest(
     strategy: &Strategy,
     initial_cash: f64,
     costs: &FillCosts,
+    // Daily risk-free rate on idle cash. 0.0 = off. Pull from FRED DGS3MO/252 for live rate.
+    rfr_daily: f64,
 ) -> BacktestResult {
     let mut gen = strategy.clone().into_generator();
     let mut portfolio = Portfolio::new(initial_cash);
     let mut curve = Vec::with_capacity(bars.len());
 
     for (i, bar) in bars.iter().enumerate() {
-        // Daily short borrow cost on any open short position (zero-ops for long-only).
-        if costs.borrow_rate_daily > 0.0 {
-            let short_qty = (-portfolio.shares(ticker)).max(0.0);
-            portfolio.cash -= short_qty * bar.close * costs.borrow_rate_daily;
+        // Overnight accruals from the previous bar's end-of-day state.
+        // Skipped at i=0 so the opening equity is always exactly 1.0.
+        if i > 0 {
+            if costs.borrow_rate_daily > 0.0 {
+                let short_qty = (-portfolio.shares(ticker)).max(0.0);
+                portfolio.cash -= short_qty * bar.close * costs.borrow_rate_daily;
+            }
+            if rfr_daily != 0.0 {
+                portfolio.cash += portfolio.cash.max(0.0) * rfr_daily;
+            }
         }
 
         // Mark-to-market BEFORE rebalance — today's equity reflects yesterday's position.
@@ -806,7 +814,7 @@ mod tests {
         // Buy 10 shares @ 100 costs $10 commission → cash = -10, equity at bar 1 = 990/1000.
         let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 100.0)];
         let costs = FillCosts { commission: 10.0, ..FillCosts::ZERO };
-        let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs);
+        let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs, 0.0);
         assert!((r.curve.last().unwrap().equity - 0.99).abs() < 1e-9);
     }
 
@@ -815,8 +823,19 @@ mod tests {
         // 1% spread on 10 shares @ 100 = $10 → same result as commission test.
         let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 100.0)];
         let costs = FillCosts { spread_fraction: 0.01, ..FillCosts::ZERO };
-        let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs);
+        let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs, 0.0);
         assert!((r.curve.last().unwrap().equity - 0.99).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rfr_accrues_on_idle_cash() {
+        // SMA windows larger than bar count → always flat (signal=0), all cash.
+        let bars: Vec<Bar> = (1..=3).map(|i| bar(&format!("2020-01-{:02}", i), 100.0)).collect();
+        let strategy = Strategy::SmaCrossover { fast: 100, slow: 200 };
+        let r = run_portfolio_backtest("X", &bars, &strategy, 1000.0, &FillCosts::ZERO, 0.01);
+        assert!((r.curve[0].equity - 1.0).abs() < 1e-9); // bar 0 always starts at 1.0
+        assert!((r.curve[1].equity - 1.01).abs() < 1e-9); // one period of RFR
+        assert!((r.curve[2].equity - 1.0201).abs() < 1e-9); // compounded
     }
 
     #[test]
@@ -906,7 +925,7 @@ mod tests {
     fn portfolio_backtest_parity_with_legacy() {
         let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 110.0), bar("2020-01-03", 121.0)];
         let legacy = run_backtest(&bars, &Strategy::BuyAndHold);
-        let new = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10000.0, &FillCosts::ZERO);
+        let new = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10000.0, &FillCosts::ZERO, 0.0);
         for (l, p) in legacy.curve.iter().zip(new.curve.iter()) {
             assert!((l.equity - p.equity).abs() < 1e-9, "mismatch at {}", l.date);
         }
@@ -922,7 +941,7 @@ mod tests {
             .collect();
         let strategy = Strategy::SmaCrossover { fast: 2, slow: 4 };
         let legacy = run_backtest(&bars, &strategy);
-        let new = run_portfolio_backtest("X", &bars, &strategy, 1000.0, &FillCosts::ZERO);
+        let new = run_portfolio_backtest("X", &bars, &strategy, 1000.0, &FillCosts::ZERO, 0.0);
         for (l, p) in legacy.curve.iter().zip(new.curve.iter()) {
             assert!((l.equity - p.equity).abs() < 1e-9, "SMA mismatch at {}", l.date);
         }

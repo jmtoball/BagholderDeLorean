@@ -105,7 +105,7 @@ async fn backtest(
         let k = q.pe_index.unwrap_or(0).min(count - 1);
         let (entry_date, entry_pe) = series[minima[count - 1 - k]];
         let trimmed: Vec<Bar> = bars.into_iter().filter(|b| b.date >= entry_date).collect();
-        let mut result = run_portfolio_backtest(&q.ticker, &trimmed, &strategy, 10_000.0, &FillCosts::ZERO);
+        let mut result = run_portfolio_backtest(&q.ticker, &trimmed, &strategy, 10_000.0, &FillCosts::ZERO, 0.0);
         result.entry_date = Some(entry_date);
         result.entry_pe = Some(entry_pe);
         result.entry_index = Some(k);
@@ -118,6 +118,7 @@ async fn backtest(
             &strategy,
             10_000.0,
             &FillCosts::ZERO,
+            0.0,
         )))
     }
 }
