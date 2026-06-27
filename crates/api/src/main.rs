@@ -10,9 +10,9 @@ use axum::{
     Json, Router,
 };
 use bagholder_core::{
-    inverse_vol_alloc, local_minima, pe_history, pe_series, run_multi_asset_backtest,
-    run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate, FillCosts,
-    Fundamental, PeHistory, RebalanceConfig, Strategy,
+    inverse_vol_alloc, local_minima, momentum_alloc, pe_history, pe_series,
+    run_multi_asset_backtest, run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate,
+    FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy, SECTOR_ETFS,
 };
 use std::collections::HashMap;
 use bagholder_data::Store;
@@ -216,8 +216,12 @@ struct PresetQuery {
     kind: String,
     /// Comma-separated Yahoo tickers. Defaults to SPY,QQQ,GLD,TLT,IEF if omitted.
     tickers: Option<String>,
-    /// Trailing window for vol estimate in trading days (default 20).
+    /// Trailing window for vol estimate in trading days (default 20, risk_parity only).
     vol_window: Option<usize>,
+    /// Momentum lookback in trading days (default 126 ≈ 6 months, sector_rotation only).
+    lookback: Option<usize>,
+    /// Top-N sectors to hold (default 3, sector_rotation only).
+    top_n: Option<usize>,
     /// Calendar rebalance interval in days (default 30).
     rebalance_days: Option<u32>,
 }
@@ -226,17 +230,22 @@ async fn preset_backtest(
     State(db): State<Db>,
     Query(q): Query<PresetQuery>,
 ) -> Result<Json<BacktestResult>, (StatusCode, String)> {
-    if q.kind != "risk_parity" {
-        return Err((StatusCode::BAD_REQUEST, format!("unknown preset: {}", q.kind)));
-    }
+    let (ticker_list, alloc_kind) = match q.kind.as_str() {
+        "risk_parity" => (
+            q.tickers.as_deref().unwrap_or("SPY,QQQ,GLD,TLT,IEF")
+                .split(',').map(|s| s.trim().to_uppercase()).collect::<Vec<_>>(),
+            "risk_parity",
+        ),
+        "sector_rotation" => (
+            SECTOR_ETFS.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            "sector_rotation",
+        ),
+        other => return Err((StatusCode::BAD_REQUEST, format!("unknown preset: {other}"))),
+    };
 
-    let ticker_list: Vec<String> = q.tickers
-        .as_deref()
-        .unwrap_or("SPY,QQQ,GLD,TLT,IEF")
-        .split(',')
-        .map(|s| s.trim().to_uppercase())
-        .collect();
     let vol_window = q.vol_window.unwrap_or(20);
+    let lookback = q.lookback.unwrap_or(126);
+    let top_n = q.top_n.unwrap_or(3);
     let rebalance_config = RebalanceConfig {
         calendar_days: Some(q.rebalance_days.unwrap_or(30)),
         bands: Some(BandConfig { absolute: 0.05, relative: 0.25 }),
@@ -252,7 +261,10 @@ async fn preset_backtest(
 
     let result = run_multi_asset_backtest(
         &bars_by_ticker,
-        move |history, _i| inverse_vol_alloc(history, vol_window),
+        move |history, _i| match alloc_kind {
+            "sector_rotation" => momentum_alloc(history, lookback, top_n),
+            _ => inverse_vol_alloc(history, vol_window),
+        },
         &rebalance_config,
         10_000.0,
         &FillCosts::ZERO,

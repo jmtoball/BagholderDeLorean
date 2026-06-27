@@ -486,6 +486,36 @@ pub fn inverse_vol_alloc(bars_to_date: &HashMap<String, &[Bar]>, window: usize) 
     Allocation(inv).normalize()
 }
 
+/// The 11 SPDR Select Sector ETFs used for sector-rotation presets.
+pub const SECTOR_ETFS: &[&str] = &[
+    "XLK", "XLV", "XLF", "XLY", "XLP", "XLE", "XLI", "XLB", "XLU", "XLRE", "XLC",
+];
+
+/// Momentum-ranked equal-weight allocation: rank all tickers by their trailing
+/// `lookback`-bar return, take the top `top_n`, weight equally.
+/// Returns equal weight across all tickers if there is insufficient history.
+pub fn momentum_alloc(
+    bars_to_date: &HashMap<String, &[Bar]>,
+    lookback: usize,
+    top_n: usize,
+) -> Allocation {
+    let mut ranked: Vec<(String, f64)> = bars_to_date.iter().filter_map(|(t, bars)| {
+        if bars.len() <= lookback { return None; }
+        let ret = bars.last().unwrap().close / bars[bars.len() - 1 - lookback].close - 1.0;
+        Some((t.clone(), ret))
+    }).collect();
+
+    if ranked.is_empty() {
+        let w = 1.0 / bars_to_date.len().max(1) as f64;
+        return Allocation(bars_to_date.keys().map(|t| (t.clone(), w)).collect());
+    }
+
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let n = top_n.min(ranked.len()).max(1);
+    let w = 1.0 / n as f64;
+    Allocation(ranked.into_iter().take(n).map(|(t, _)| (t, w)).collect())
+}
+
 /// Multi-asset event-driven backtest. Bars for each ticker are date-aligned
 /// to their intersection; `alloc_fn` is called each bar with history up to
 /// (inclusive) that bar and the current date index.
@@ -1164,6 +1194,29 @@ mod tests {
         p.fill("AAPL", -7.0, 130.0, d3);
         assert!((p.realized_pnl - 190.0).abs() < 1e-9);
         assert!((p.shares("AAPL") - 3.0).abs() < 1e-9); // 3 remain from lot 2
+    }
+
+    #[test]
+    fn momentum_alloc_picks_top_n_by_return() {
+        // A: flat, B: up 10%, C: up 20%. top_n=2 → B and C, equal weight.
+        let mk = |prices: &[f64]| -> Vec<Bar> {
+            prices.iter().enumerate()
+                .map(|(i, &c)| bar(&format!("2020-01-{:02}", i + 1), c))
+                .collect()
+        };
+        let universe = HashMap::from([
+            ("A".to_string(), mk(&[100.0, 100.0, 100.0])),
+            ("B".to_string(), mk(&[100.0, 105.0, 110.0])),
+            ("C".to_string(), mk(&[100.0, 110.0, 120.0])),
+        ]);
+        let history: HashMap<String, &[Bar]> = universe.iter()
+            .map(|(t, b)| (t.clone(), b.as_slice()))
+            .collect();
+        let alloc = momentum_alloc(&history, 2, 2);
+        assert!(!alloc.0.contains_key("A") || alloc.0["A"] == 0.0, "A should be excluded");
+        let bw = alloc.0.get("B").copied().unwrap_or(0.0);
+        let cw = alloc.0.get("C").copied().unwrap_or(0.0);
+        assert!((bw - 0.5).abs() < 1e-9 && (cw - 0.5).abs() < 1e-9, "B and C should be 50/50");
     }
 
     #[test]
