@@ -34,6 +34,25 @@ pub struct Fundamental {
     pub filed_date: Option<NaiveDate>,
 }
 
+/// A corporate action applied on its ex-date.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum CaKind {
+    /// Share count multiplied by `ratio`, basis price divided by `ratio`.
+    Split { ratio: f64 },
+    /// Cash credited per long share held.
+    /// ponytail: meaningful with raw (unadjusted) prices only — with adjclose,
+    /// dividends are already in the return series, so this double-counts.
+    /// Implement raw-price support before enabling Dividend in production.
+    Dividend { amount_per_share: f64 },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CorporateAction {
+    pub ex_date: NaiveDate,
+    pub ticker: String,
+    pub kind: CaKind,
+}
+
 /// Trailing-twelve-month price/earnings from the latest close and the four most
 /// recent quarterly EPS figures (most-recent-first). `None` when EPS history is
 /// short or trailing earnings are non-positive (P/E is then undefined).
@@ -189,6 +208,28 @@ impl Portfolio {
                         self.cash -= costs.transaction_tax * delta.abs() * price;
                     }
                     self.fill(ticker, delta, price, date);
+                }
+            }
+        }
+    }
+
+    /// Apply a corporate action. Split adjusts lot quantities and basis prices so
+    /// equity at the post-split price is unchanged. Dividend credits cash (see
+    /// `CaKind::Dividend` note about adjclose double-counting).
+    pub fn apply_action(&mut self, ticker: &str, kind: &CaKind) {
+        match kind {
+            CaKind::Split { ratio } => {
+                if let Some(lots) = self.positions.get_mut(ticker) {
+                    for lot in lots {
+                        lot.qty *= ratio;
+                        lot.entry_price /= ratio;
+                    }
+                }
+            }
+            CaKind::Dividend { amount_per_share } => {
+                let shares = self.shares(ticker).max(0.0);
+                if shares > 0.0 {
+                    self.cash += shares * amount_per_share;
                 }
             }
         }
@@ -978,6 +1019,7 @@ pub fn run_portfolio_backtest(
     costs: &FillCosts,
     // Daily risk-free rate on idle cash. 0.0 = off. Pull from FRED DGS3MO/252 for live rate.
     rfr_daily: f64,
+    corporate_actions: &[CorporateAction],
 ) -> BacktestResult {
     let mut gen = strategy.clone().into_generator();
     let mut portfolio = Portfolio::new(initial_cash);
@@ -994,6 +1036,12 @@ pub fn run_portfolio_backtest(
             if rfr_daily != 0.0 {
                 portfolio.cash += portfolio.cash.max(0.0) * rfr_daily;
             }
+        }
+
+        // Apply any corporate actions on this bar's date before mark-to-market so
+        // lot quantities and prices stay consistent with the adjusted close series.
+        for ca in corporate_actions.iter().filter(|a| a.ex_date == bar.date && a.ticker == ticker) {
+            portfolio.apply_action(ticker, &ca.kind);
         }
 
         // Mark-to-market BEFORE rebalance — today's equity reflects yesterday's position.
@@ -1304,7 +1352,7 @@ mod tests {
         // Buy 10 shares @ 100 costs $10 commission → cash = -10, equity at bar 1 = 990/1000.
         let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 100.0)];
         let costs = FillCosts { commission: 10.0, ..FillCosts::ZERO };
-        let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs, 0.0);
+        let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs, 0.0, &[]);
         assert!((r.curve.last().unwrap().equity - 0.99).abs() < 1e-9);
     }
 
@@ -1313,7 +1361,7 @@ mod tests {
         // 1% spread on 10 shares @ 100 = $10 → same result as commission test.
         let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 100.0)];
         let costs = FillCosts { spread_fraction: 0.01, ..FillCosts::ZERO };
-        let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs, 0.0);
+        let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs, 0.0, &[]);
         assert!((r.curve.last().unwrap().equity - 0.99).abs() < 1e-9);
     }
 
@@ -1322,7 +1370,7 @@ mod tests {
         // SMA windows larger than bar count → always flat (signal=0), all cash.
         let bars: Vec<Bar> = (1..=3).map(|i| bar(&format!("2020-01-{:02}", i), 100.0)).collect();
         let strategy = Strategy::SmaCrossover { fast: 100, slow: 200 };
-        let r = run_portfolio_backtest("X", &bars, &strategy, 1000.0, &FillCosts::ZERO, 0.01);
+        let r = run_portfolio_backtest("X", &bars, &strategy, 1000.0, &FillCosts::ZERO, 0.01, &[]);
         assert!((r.curve[0].equity - 1.0).abs() < 1e-9); // bar 0 always starts at 1.0
         assert!((r.curve[1].equity - 1.01).abs() < 1e-9); // one period of RFR
         assert!((r.curve[2].equity - 1.0201).abs() < 1e-9); // compounded
@@ -1415,7 +1463,7 @@ mod tests {
     fn portfolio_backtest_parity_with_legacy() {
         let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 110.0), bar("2020-01-03", 121.0)];
         let legacy = run_backtest(&bars, &Strategy::BuyAndHold);
-        let new = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10000.0, &FillCosts::ZERO, 0.0);
+        let new = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10000.0, &FillCosts::ZERO, 0.0, &[]);
         for (l, p) in legacy.curve.iter().zip(new.curve.iter()) {
             assert!((l.equity - p.equity).abs() < 1e-9, "mismatch at {}", l.date);
         }
@@ -1431,7 +1479,7 @@ mod tests {
             .collect();
         let strategy = Strategy::SmaCrossover { fast: 2, slow: 4 };
         let legacy = run_backtest(&bars, &strategy);
-        let new = run_portfolio_backtest("X", &bars, &strategy, 1000.0, &FillCosts::ZERO, 0.0);
+        let new = run_portfolio_backtest("X", &bars, &strategy, 1000.0, &FillCosts::ZERO, 0.0, &[]);
         for (l, p) in legacy.curve.iter().zip(new.curve.iter()) {
             assert!((l.equity - p.equity).abs() < 1e-9, "SMA mismatch at {}", l.date);
         }
@@ -1620,7 +1668,7 @@ mod tests {
         let mut bars: Vec<Bar> = (0..20).map(|i| bar(&format!("2020-01-{:02}", i + 1), 100.0)).collect();
         bars.push(bar("2020-01-21", 50.0));
         let strategy = Strategy::BuyTheDip { rsi_period: 14, rsi_threshold: 20.0, bb_period: 20, bb_std: 2.0 };
-        let r = run_portfolio_backtest("X", &bars, &strategy, 1000.0, &FillCosts::ZERO, 0.0);
+        let r = run_portfolio_backtest("X", &bars, &strategy, 1000.0, &FillCosts::ZERO, 0.0, &[]);
         assert_eq!(r.curve.last().unwrap().equity, r.curve.last().unwrap().equity); // compiles
         // The crash bar should have been entered (signal=1 after prior flat period).
         // Signal at bar 20 (the crash) fires on the crash close; equity recovers from bar 21 onward
@@ -1648,6 +1696,35 @@ mod tests {
         assert_eq!(sigs[0], 0.0);
         assert_eq!(sigs[1], 0.0);
         assert_eq!(sigs[2], 1.0); // RSI=0 < 30
+    }
+
+    #[test]
+    fn split_adjusts_lots_and_preserves_equity() {
+        let d: NaiveDate = "2024-01-01".parse().unwrap();
+        let mut p = Portfolio::new(1000.0);
+        p.fill("X", 10.0, 100.0, d); // 10 shares @ $100
+        p.apply_action("X", &CaKind::Split { ratio: 2.0 });
+        assert!((p.shares("X") - 20.0).abs() < 1e-9); // doubled
+        assert!((p.positions["X"][0].entry_price - 50.0).abs() < 1e-9); // halved
+        let prices = HashMap::from([("X".to_string(), 50.0)]);
+        assert!((p.equity(&prices) - 1000.0).abs() < 1e-9); // unchanged
+    }
+
+    #[test]
+    fn split_in_backtest_preserves_equity_curve() {
+        // Bar 0: price=100, buy. Bar 1: price=50 (2:1 split ex-date). Without lot
+        // adjustment, equity would halve. With it, equity stays at 1.0.
+        let bars = vec![
+            bar("2024-01-01", 100.0),
+            bar("2024-01-02", 50.0),
+        ];
+        let actions = vec![CorporateAction {
+            ex_date: "2024-01-02".parse().unwrap(),
+            ticker: "X".to_string(),
+            kind: CaKind::Split { ratio: 2.0 },
+        }];
+        let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &FillCosts::ZERO, 0.0, &actions);
+        assert!((r.curve[1].equity - 1.0).abs() < 1e-9);
     }
 
     #[test]

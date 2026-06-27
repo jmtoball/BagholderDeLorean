@@ -2,9 +2,9 @@
 //! SQL, fast range scans for backtests. OHLCV is a wide table; fundamentals is
 //! tall (`ticker, period, metric, value`) so the metric set stays open-ended.
 
-use crate::{download_cik_map, download_fred_series, download_fundamentals, download_ohlcv};
+use crate::{download_cik_map, download_corporate_actions, download_fred_series, download_fundamentals, download_ohlcv};
 use anyhow::{Context, Result};
-use bagholder_core::{Bar, Fundamental};
+use bagholder_core::{Bar, CaKind, CorporateAction, Fundamental};
 use chrono::NaiveDate;
 use duckdb::{params, Connection};
 
@@ -33,6 +33,16 @@ CREATE TABLE IF NOT EXISTS macro_series (
   value     DOUBLE,
   PRIMARY KEY (series_id, date)
 );
+CREATE TABLE IF NOT EXISTS corporate_actions (
+  ticker      TEXT   NOT NULL,
+  ex_date     DATE   NOT NULL,
+  action_type TEXT   NOT NULL,  -- 'split' or 'dividend'
+  ratio       DOUBLE,           -- split ratio (new/old shares), NULL for dividends
+  amount      DOUBLE,           -- dividend per share, NULL for splits
+  PRIMARY KEY (ticker, ex_date, action_type)
+);
+-- Sentinel: tracks which tickers have had their CA fetched (handles zero-action case).
+CREATE TABLE IF NOT EXISTS ca_fetched (ticker TEXT PRIMARY KEY);
 ";
 
 /// Strip Stooq's exchange suffix and upper-case, so "AAPL.US" -> "AAPL" and
@@ -202,6 +212,62 @@ impl Store {
                 .prepare("INSERT OR REPLACE INTO cik_map VALUES (?, ?)")?;
             for (ticker, cik) in map {
                 stmt.execute(params![ticker, cik])?;
+            }
+        }
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
+    /// Cached corporate actions (splits + dividends) for a ticker.
+    /// Uses `ca_fetched` as a sentinel so zero-action tickers aren't re-fetched.
+    pub fn corporate_actions(&self, ticker: &str) -> Result<Vec<CorporateAction>> {
+        let fetched: i64 = self.conn.query_row(
+            "SELECT count(*) FROM ca_fetched WHERE ticker = ?", [ticker], |r| r.get(0),
+        )?;
+        if fetched > 0 {
+            return self.read_actions(ticker);
+        }
+        let actions = download_corporate_actions(ticker)?;
+        self.write_actions(ticker, &actions)?;
+        self.conn.execute("INSERT OR IGNORE INTO ca_fetched VALUES (?)", [ticker])?;
+        Ok(actions)
+    }
+
+    fn read_actions(&self, ticker: &str) -> Result<Vec<CorporateAction>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ex_date, action_type, ratio, amount FROM corporate_actions \
+             WHERE ticker = ? ORDER BY ex_date",
+        )?;
+        let actions = stmt
+            .query_map([ticker], |r| {
+                let ex_date: NaiveDate = r.get(0)?;
+                let action_type: String = r.get(1)?;
+                let ratio: Option<f64> = r.get(2)?;
+                let amount: Option<f64> = r.get(3)?;
+                let kind = if action_type == "split" {
+                    CaKind::Split { ratio: ratio.unwrap_or(1.0) }
+                } else {
+                    CaKind::Dividend { amount_per_share: amount.unwrap_or(0.0) }
+                };
+                Ok(CorporateAction { ex_date, ticker: String::new(), kind })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(actions.into_iter().map(|mut a| { a.ticker = ticker.to_owned(); a }).collect())
+    }
+
+    fn write_actions(&self, ticker: &str, actions: &[CorporateAction]) -> Result<()> {
+        self.conn.execute("DELETE FROM corporate_actions WHERE ticker = ?", [ticker])?;
+        self.conn.execute_batch("BEGIN")?;
+        {
+            let mut stmt = self.conn.prepare(
+                "INSERT OR REPLACE INTO corporate_actions VALUES (?, ?, ?, ?, ?)",
+            )?;
+            for a in actions {
+                let (action_type, ratio, amount) = match &a.kind {
+                    CaKind::Split { ratio } => ("split", Some(*ratio), None),
+                    CaKind::Dividend { amount_per_share } => ("dividend", None, Some(*amount_per_share)),
+                };
+                stmt.execute(params![ticker, a.ex_date, action_type, ratio, amount])?;
             }
         }
         self.conn.execute_batch("COMMIT")?;

@@ -10,7 +10,7 @@ pub use store::Store;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use bagholder_core::{Bar, Fundamental};
+use bagholder_core::{Bar, CaKind, CorporateAction, Fundamental};
 use chrono::NaiveDate;
 use serde::Deserialize;
 
@@ -123,6 +123,77 @@ fn parse_yahoo_chart(body: &str) -> Result<Vec<Bar>> {
         anyhow::bail!("yahoo returned no usable bars");
     }
     Ok(bars)
+}
+
+// --- Corporate actions (splits + dividends) ----------------------------------
+
+/// Download splits and dividends for `symbol` from Yahoo Finance's chart API.
+/// Same endpoint as `download_ohlcv`; the `events` parameter returns actions.
+pub fn download_corporate_actions(symbol: &str) -> Result<Vec<CorporateAction>> {
+    let url = format!(
+        "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}\
+         ?period1=0&period2=9999999999&interval=1d&events=split,dividend"
+    );
+    let body = reqwest::blocking::Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; BagholderDeLorean/0.1)")
+        .build()?
+        .get(&url)
+        .send()
+        .with_context(|| format!("requesting corporate actions for {symbol}"))?
+        .error_for_status()?
+        .text()?;
+    parse_yahoo_events(symbol, &body)
+}
+
+fn parse_yahoo_events(ticker: &str, body: &str) -> Result<Vec<CorporateAction>> {
+    #[derive(Deserialize, Default)]
+    struct Events {
+        #[serde(default)]
+        splits: std::collections::HashMap<String, SplitRow>,
+        #[serde(default)]
+        dividends: std::collections::HashMap<String, DivRow>,
+    }
+    #[derive(Deserialize)]
+    struct SplitRow { date: i64, numerator: f64, denominator: f64 }
+    #[derive(Deserialize)]
+    struct DivRow { date: i64, amount: f64 }
+    #[derive(Deserialize)]
+    struct ChartResult { #[serde(default)] events: Events }
+    #[derive(Deserialize)]
+    struct Chart { result: Option<Vec<ChartResult>> }
+    #[derive(Deserialize)]
+    struct Resp { chart: Chart }
+
+    let resp: Resp = serde_json::from_str(body).context("parsing yahoo events JSON")?;
+    let events = resp.chart.result
+        .and_then(|mut rs| rs.pop())
+        .map(|r| r.events)
+        .unwrap_or_default();
+
+    let mut out = Vec::new();
+    for row in events.splits.values() {
+        if row.denominator == 0.0 { continue; }
+        let ex_date = chrono::DateTime::from_timestamp(row.date, 0)
+            .context("invalid split timestamp")?
+            .date_naive();
+        out.push(CorporateAction {
+            ex_date,
+            ticker: ticker.to_owned(),
+            kind: CaKind::Split { ratio: row.numerator / row.denominator },
+        });
+    }
+    for row in events.dividends.values() {
+        let ex_date = chrono::DateTime::from_timestamp(row.date, 0)
+            .context("invalid dividend timestamp")?
+            .date_naive();
+        out.push(CorporateAction {
+            ex_date,
+            ticker: ticker.to_owned(),
+            kind: CaKind::Dividend { amount_per_share: row.amount },
+        });
+    }
+    out.sort_by_key(|a| a.ex_date);
+    Ok(out)
 }
 
 // --- FRED macro series -------------------------------------------------------

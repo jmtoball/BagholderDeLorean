@@ -12,7 +12,8 @@ use axum::{
 use bagholder_core::{
     econ_cycle_alloc, inverse_vol_alloc, local_minima, momentum_alloc, pairs_alloc, pe_history,
     pe_series, run_multi_asset_backtest, run_portfolio_backtest, Bar, BacktestResult, BandConfig,
-    Candidate, FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy, SECTOR_ETFS,
+    Candidate, CorporateAction, FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy,
+    SECTOR_ETFS,
 };
 use std::collections::HashMap;
 use bagholder_data::Store;
@@ -99,7 +100,7 @@ async fn backtest(
     let ticker = q.ticker.clone();
     let pe_min = q.entry.as_deref() == Some("pe_min");
     // Blocking DB + network I/O must not run on the async runtime's workers.
-    let (bars, eps) = tokio::task::spawn_blocking(move || {
+    let (bars, eps, actions) = tokio::task::spawn_blocking(move || {
         let db = db.lock().unwrap();
         let bars = db.ohlcv(&ticker)?;
         // Only the fundamentals fetch is conditional — skip it for plain runs.
@@ -108,7 +109,8 @@ async fn backtest(
         } else {
             Vec::new()
         };
-        Ok::<_, anyhow::Error>((bars, eps))
+        let actions: Vec<CorporateAction> = db.corporate_actions(&ticker)?;
+        Ok::<_, anyhow::Error>((bars, eps, actions))
     })
     .await
     .map_err(internal)?
@@ -127,7 +129,7 @@ async fn backtest(
         let k = q.pe_index.unwrap_or(0).min(count - 1);
         let (entry_date, entry_pe) = series[minima[count - 1 - k]];
         let trimmed: Vec<Bar> = bars.into_iter().filter(|b| b.date >= entry_date).collect();
-        let mut result = run_portfolio_backtest(&q.ticker, &trimmed, &strategy, 10_000.0, &FillCosts::ZERO, 0.0);
+        let mut result = run_portfolio_backtest(&q.ticker, &trimmed, &strategy, 10_000.0, &FillCosts::ZERO, 0.0, &actions);
         result.entry_date = Some(entry_date);
         result.entry_pe = Some(entry_pe);
         result.entry_index = Some(k);
@@ -141,6 +143,7 @@ async fn backtest(
             10_000.0,
             &FillCosts::ZERO,
             0.0,
+            &actions,
         )))
     }
 }
