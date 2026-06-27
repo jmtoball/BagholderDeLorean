@@ -1,4 +1,6 @@
 /target
+/plan/
+/design_system/
 crates/web/dist
 crates/web/e2e/shots
 crates/web/e2e/node_modules
