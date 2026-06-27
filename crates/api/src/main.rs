@@ -37,6 +37,11 @@ struct BacktestQuery {
     /// Which trough to enter, counting back from most recent (0 = latest).
     /// Clamped to the available range.
     pe_index: Option<usize>,
+    // BuyTheDip params (strategy=buy_the_dip)
+    rsi_period: Option<usize>,
+    rsi_threshold: Option<f64>,
+    bb_period: Option<usize>,
+    bb_std: Option<f64>,
 }
 
 fn default_strategy() -> String {
@@ -70,6 +75,12 @@ async fn backtest(
         "sma_crossover" => Strategy::SmaCrossover {
             fast: q.fast.unwrap_or(20),
             slow: q.slow.unwrap_or(50),
+        },
+        "buy_the_dip" => Strategy::BuyTheDip {
+            rsi_period: q.rsi_period.unwrap_or(14),
+            rsi_threshold: q.rsi_threshold.unwrap_or(20.0),
+            bb_period: q.bb_period.unwrap_or(20),
+            bb_std: q.bb_std.unwrap_or(2.0),
         },
         _ => Strategy::BuyAndHold,
     };
