@@ -10,7 +10,7 @@ use axum::{
     Json, Router,
 };
 use bagholder_core::{
-    inverse_vol_alloc, local_minima, momentum_alloc, pe_history, pe_series,
+    inverse_vol_alloc, local_minima, momentum_alloc, pairs_alloc, pe_history, pe_series,
     run_multi_asset_backtest, run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate,
     FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy, SECTOR_ETFS,
 };
@@ -229,6 +229,12 @@ struct PresetQuery {
     lookback: Option<usize>,
     /// Top-N sectors to hold (default 3, sector_rotation only).
     top_n: Option<usize>,
+    /// Pairs: first ticker of the pair (pairs only).
+    ticker_a: Option<String>,
+    /// Pairs: second ticker of the pair (pairs only).
+    ticker_b: Option<String>,
+    /// Pairs: z-score entry threshold (default 2.0, pairs only).
+    entry_z: Option<f64>,
     /// Calendar rebalance interval in days (default 30).
     rebalance_days: Option<u32>,
 }
@@ -237,6 +243,30 @@ async fn preset_backtest(
     State(db): State<Db>,
     Query(q): Query<PresetQuery>,
 ) -> Result<Json<BacktestResult>, (StatusCode, String)> {
+    // "pairs" has its own flow — handle early.
+    if q.kind == "pairs" {
+        let ta = q.ticker_a.clone().unwrap_or_else(|| "KO".to_string()).to_uppercase();
+        let tb = q.ticker_b.clone().unwrap_or_else(|| "PEP".to_string()).to_uppercase();
+        let entry_z = q.entry_z.unwrap_or(2.0);
+        let win = q.lookback.unwrap_or(60);
+        let ta2 = ta.clone(); let tb2 = tb.clone();
+        let bars_by_ticker: HashMap<String, Vec<Bar>> = tokio::task::spawn_blocking(move || {
+            let db = db.lock().unwrap();
+            Ok::<_, anyhow::Error>(HashMap::from([(ta.clone(), db.ohlcv(&ta)?), (tb.clone(), db.ohlcv(&tb)?)]))
+        }).await.map_err(internal)?.map_err(internal)?;
+        let cfg = RebalanceConfig {
+            calendar_days: Some(q.rebalance_days.unwrap_or(5)),
+            bands: Some(BandConfig { absolute: 0.05, relative: 0.25 }),
+            full: true,
+        };
+        let result = run_multi_asset_backtest(
+            &bars_by_ticker,
+            move |history, _| pairs_alloc(history, &ta2, &tb2, win, entry_z),
+            &cfg, 10_000.0, &FillCosts::ZERO, 0.0,
+        );
+        return Ok(Json(result));
+    }
+
     let (ticker_list, alloc_kind) = match q.kind.as_str() {
         "risk_parity" => (
             q.tickers.as_deref().unwrap_or("SPY,QQQ,GLD,TLT,IEF")

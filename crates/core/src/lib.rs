@@ -74,28 +74,44 @@ impl Portfolio {
         Portfolio { cash, ..Default::default() }
     }
 
-    /// Execute a fill: positive qty = buy, negative = sell (FIFO close).
+    /// Execute a fill: positive qty = buy (covers shorts first, then opens long);
+    /// negative qty = sell (closes longs first FIFO, then opens short with remainder).
     pub fn fill(&mut self, ticker: &str, qty: f64, price: f64, date: NaiveDate) {
         if qty > 0.0 {
-            self.cash -= qty * price;
-            self.positions
-                .entry(ticker.to_owned())
-                .or_default()
-                .push(Lot { qty, entry_price: price, entry_date: date });
+            let mut remaining = qty;
+            let lots = self.positions.entry(ticker.to_owned()).or_default();
+            // Cover short lots first (FIFO).
+            for lot in lots.iter_mut().filter(|l| l.qty < 0.0) {
+                if remaining <= 0.0 { break; }
+                let covered = (-lot.qty).min(remaining);
+                self.realized_pnl += covered * (lot.entry_price - price);
+                self.cash -= covered * price;
+                lot.qty += covered;
+                remaining -= covered;
+            }
+            lots.retain(|l| l.qty.abs() > 1e-10);
+            if remaining > 1e-10 {
+                self.cash -= remaining * price;
+                lots.push(Lot { qty: remaining, entry_price: price, entry_date: date });
+            }
         } else if qty < 0.0 {
             let mut remaining = -qty;
             let lots = self.positions.entry(ticker.to_owned()).or_default();
-            for lot in lots.iter_mut() {
-                if remaining <= 0.0 {
-                    break;
-                }
+            // Close long lots first (FIFO).
+            for lot in lots.iter_mut().filter(|l| l.qty > 0.0) {
+                if remaining <= 0.0 { break; }
                 let closed = lot.qty.min(remaining);
                 self.realized_pnl += closed * (price - lot.entry_price);
                 self.cash += closed * price;
                 lot.qty -= closed;
                 remaining -= closed;
             }
-            lots.retain(|l| l.qty > 0.0);
+            lots.retain(|l| l.qty.abs() > 1e-10);
+            // Remainder opens a short position (receive proceeds).
+            if remaining > 1e-10 {
+                self.cash += remaining * price;
+                lots.push(Lot { qty: -remaining, entry_price: price, entry_date: date });
+            }
         }
     }
 
@@ -687,6 +703,51 @@ pub fn momentum_alloc(
     let n = top_n.min(ranked.len()).max(1);
     let w = 1.0 / n as f64;
     Allocation(ranked.into_iter().take(n).map(|(t, _)| (t, w)).collect())
+}
+
+/// Pairs (stat-arb) allocation from the log-price spread z-score.
+///
+/// - z < -`entry_z`: long A, short B (spread below mean → A cheap vs B)
+/// - z > +`entry_z`: short A, long B (spread above mean → A expensive)
+/// - |z| < `entry_z`: flat (explicit 0-weight closes any open position)
+///
+/// ponytail: no hysteresis — entry and exit at the same z threshold. Add a
+/// separate `exit_z` state machine if transaction costs make this too active.
+pub fn pairs_alloc(
+    bars_to_date: &HashMap<String, &[Bar]>,
+    ticker_a: &str,
+    ticker_b: &str,
+    window: usize,
+    entry_z: f64,
+) -> Allocation {
+    let get = |t: &str| bars_to_date.get(t).copied();
+    let (ba, bb) = match (get(ticker_a), get(ticker_b)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return Allocation::default(),
+    };
+    let n = ba.len().min(bb.len());
+    if n < window + 1 { return Allocation::default(); }
+
+    let spreads: Vec<f64> = (n - window - 1..n)
+        .map(|i| (ba[i].close / bb[i].close).ln())
+        .collect();
+    let mean = spreads.iter().sum::<f64>() / spreads.len() as f64;
+    let var = spreads.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / spreads.len() as f64;
+    let std = var.sqrt();
+    if std < 1e-12 { return Allocation::default(); }
+    let z = (spreads.last().unwrap() - mean) / std;
+
+    let flat = Allocation(HashMap::from([
+        (ticker_a.to_owned(), 0.0),
+        (ticker_b.to_owned(), 0.0),
+    ]));
+    if z < -entry_z {
+        Allocation(HashMap::from([(ticker_a.to_owned(), 0.5), (ticker_b.to_owned(), -0.5)]))
+    } else if z > entry_z {
+        Allocation(HashMap::from([(ticker_a.to_owned(), -0.5), (ticker_b.to_owned(), 0.5)]))
+    } else {
+        flat
+    }
 }
 
 /// Multi-asset event-driven backtest. Bars for each ticker are date-aligned
@@ -1367,6 +1428,55 @@ mod tests {
         p.fill("AAPL", -7.0, 130.0, d3);
         assert!((p.realized_pnl - 190.0).abs() < 1e-9);
         assert!((p.shares("AAPL") - 3.0).abs() < 1e-9); // 3 remain from lot 2
+    }
+
+    #[test]
+    fn fill_short_sell_and_cover() {
+        let d: NaiveDate = "2024-01-01".parse().unwrap();
+        let mut p = Portfolio::new(1000.0);
+        // Short 5 @ 100: receive 500
+        p.fill("X", -5.0, 100.0, d);
+        assert!((p.shares("X") - (-5.0)).abs() < 1e-9);
+        assert!((p.cash - 1500.0).abs() < 1e-9); // 1000 + 500 short proceeds
+        // Cover 5 @ 80 (price fell): profit = 5 * (100 - 80) = 100
+        p.fill("X", 5.0, 80.0, d);
+        assert!(p.shares("X").abs() < 1e-9);
+        assert!((p.realized_pnl - 100.0).abs() < 1e-9);
+        assert!((p.cash - 1100.0).abs() < 1e-9); // 1500 - 5*80 = 1100
+    }
+
+    #[test]
+    fn fill_sell_through_zero_into_short() {
+        let d: NaiveDate = "2024-01-01".parse().unwrap();
+        let mut p = Portfolio::new(1000.0);
+        p.fill("X", 3.0, 100.0, d); // buy 3
+        p.fill("X", -5.0, 100.0, d); // sell 5 (close 3, open short 2)
+        assert!((p.shares("X") - (-2.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pairs_alloc_signal_direction() {
+        // A jumps far above B → z > entry_z → short A, long B.
+        let mk = |prices: &[f64]| -> Vec<Bar> {
+            prices.iter().enumerate()
+                .map(|(i, &c)| bar(&format!("2020-01-{:02}", i + 1), c))
+                .collect()
+        };
+        let n = 25;
+        let mut a_prices = vec![100.0f64; n];
+        let mut b_prices = vec![100.0f64; n];
+        *a_prices.last_mut().unwrap() = 200.0; // A spikes
+        let bars_a = mk(&a_prices);
+        let bars_b = mk(&b_prices);
+        let history = HashMap::from([
+            ("A".to_string(), bars_a.as_slice()),
+            ("B".to_string(), bars_b.as_slice()),
+        ]);
+        let alloc = pairs_alloc(&history, "A", "B", 20, 1.0);
+        let wa = alloc.0.get("A").copied().unwrap_or(0.0);
+        let wb = alloc.0.get("B").copied().unwrap_or(0.0);
+        assert!(wa < 0.0, "A spike → should short A (wa={wa})");
+        assert!(wb > 0.0, "A spike → should long B (wb={wb})");
     }
 
     #[test]
