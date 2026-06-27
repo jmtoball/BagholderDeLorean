@@ -24,6 +24,10 @@ trunk serve   # dev server on :8080, proxies /api -> :3000 (run from crates/web)
 trunk build   # outputs crates/web/dist, which the API server serves in prod
 
 cargo check -p bagholder-web --target wasm32-unknown-unknown   # type-check web without trunk
+
+# Browser smoke test (Playwright) — drives both UI flows, screenshots to e2e/shots/
+# With the app running on :3000 (see crates/web/e2e/README.md):
+cd crates/web/e2e && npm link playwright && node validate.mjs
 ```
 
 For the full stack locally: `cargo run -p bagholder-api` in one terminal, `trunk serve` (from `crates/web`) in another, open http://localhost:8080.

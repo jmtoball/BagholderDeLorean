@@ -1,5 +1,7 @@
 /target
 crates/web/dist
+crates/web/e2e/shots
+crates/web/e2e/node_modules
 *.duckdb
 *.duckdb.wal
 **/*.rs.bk
