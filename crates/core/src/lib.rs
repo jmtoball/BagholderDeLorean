@@ -156,9 +156,34 @@ pub enum Order {
     TargetWeight { ticker: String, weight: f64 },
 }
 
+/// Incremental signal source: consumes one bar at a time and returns a target
+/// weight (0.0 = flat, 1.0 = fully long). Implementations must not store or
+/// peek at future data — the no-lookahead invariant applies here.
+pub trait SignalGenerator {
+    fn next(&mut self, bar: &Bar) -> f64;
+}
+
+struct BuyAndHoldGen;
+impl SignalGenerator for BuyAndHoldGen {
+    fn next(&mut self, _bar: &Bar) -> f64 { 1.0 }
+}
+
+/// ponytail: O(fast + slow) per bar — swap to a running-sum deque when windows
+/// exceed ~200 and history exceeds ~10k bars.
+struct SmaCrossoverGen { fast: usize, slow: usize, history: Vec<f64> }
+impl SignalGenerator for SmaCrossoverGen {
+    fn next(&mut self, bar: &Bar) -> f64 {
+        self.history.push(bar.close);
+        let n = self.history.len();
+        if n < self.slow { return 0.0; }
+        let fast_avg = self.history[n - self.fast..].iter().sum::<f64>() / self.fast as f64;
+        let slow_avg = self.history[n - self.slow..].iter().sum::<f64>() / self.slow as f64;
+        if fast_avg > slow_avg { 1.0 } else { 0.0 }
+    }
+}
+
 /// Built-in strategies. An enum (not a trait) so the web form can serialize a
-/// choice directly. ponytail: swap to a `trait Strategy` + registry only when
-/// users need to plug in their own.
+/// choice directly; `into_generator()` bridges to the incremental engine.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Strategy {
@@ -167,9 +192,17 @@ pub enum Strategy {
 }
 
 impl Strategy {
-    /// Target position per bar: 1.0 = fully long, 0.0 = flat. No lookahead —
-    /// signal[i] uses only closes up to and including bar i.
-    pub fn signals(&self, closes: &[f64]) -> Vec<f64> {
+    pub fn into_generator(self) -> Box<dyn SignalGenerator> {
+        match self {
+            Strategy::BuyAndHold => Box::new(BuyAndHoldGen),
+            Strategy::SmaCrossover { fast, slow } => {
+                Box::new(SmaCrossoverGen { fast, slow, history: Vec::new() })
+            }
+        }
+    }
+
+    /// Batch signals — kept for `run_backtest` and the `sma_has_no_lookahead` test.
+    fn signals(&self, closes: &[f64]) -> Vec<f64> {
         match *self {
             Strategy::BuyAndHold => vec![1.0; closes.len()],
             Strategy::SmaCrossover { fast, slow } => {
@@ -273,29 +306,27 @@ pub fn run_backtest(bars: &[Bar], strategy: &Strategy) -> BacktestResult {
 /// rebalances to `signal * equity / price` shares at the bar's close.
 ///
 /// Produces the same equity curve as `run_backtest` (verified by parity tests).
-/// ponytail: signals precomputed O(n) — swap to Strategy::next_signal() when A4
-/// lands the trait so incremental strategies don't recompute history each bar.
 pub fn run_portfolio_backtest(
     ticker: &str,
     bars: &[Bar],
     strategy: &Strategy,
     initial_cash: f64,
 ) -> BacktestResult {
-    let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
-    let signals = strategy.signals(&closes);
+    let mut gen = strategy.clone().into_generator();
     let mut portfolio = Portfolio::new(initial_cash);
     let mut curve = Vec::with_capacity(bars.len());
 
-    for i in 0..bars.len() {
+    for bar in bars {
         // Mark-to-market BEFORE rebalance — today's equity reflects yesterday's position.
-        let eq = portfolio.cash + portfolio.shares(ticker) * closes[i];
-        curve.push(EquityPoint { date: bars[i].date, equity: eq / initial_cash });
+        let eq = portfolio.cash + portfolio.shares(ticker) * bar.close;
+        curve.push(EquityPoint { date: bar.date, equity: eq / initial_cash });
 
-        // Rebalance to signal[i]; fills at today's close, earns tomorrow's return.
+        // Signal uses only data through this bar; fills at close, earns next bar's return.
+        let weight = gen.next(bar);
         portfolio.execute(
-            &Order::TargetWeight { ticker: ticker.to_owned(), weight: signals[i] },
-            closes[i],
-            bars[i].date,
+            &Order::TargetWeight { ticker: ticker.to_owned(), weight },
+            bar.close,
+            bar.date,
         );
     }
 
