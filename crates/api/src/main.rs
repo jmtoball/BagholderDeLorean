@@ -11,7 +11,7 @@ use axum::{
 };
 use bagholder_core::{
     local_minima, pe_history, pe_series, run_portfolio_backtest, Bar, BacktestResult, Candidate,
-    Fundamental, PeHistory, Strategy,
+    FillCosts, Fundamental, PeHistory, Strategy,
 };
 use bagholder_data::Store;
 use serde::Deserialize;
@@ -105,7 +105,7 @@ async fn backtest(
         let k = q.pe_index.unwrap_or(0).min(count - 1);
         let (entry_date, entry_pe) = series[minima[count - 1 - k]];
         let trimmed: Vec<Bar> = bars.into_iter().filter(|b| b.date >= entry_date).collect();
-        let mut result = run_portfolio_backtest(&q.ticker, &trimmed, &strategy, 10_000.0);
+        let mut result = run_portfolio_backtest(&q.ticker, &trimmed, &strategy, 10_000.0, &FillCosts::ZERO);
         result.entry_date = Some(entry_date);
         result.entry_pe = Some(entry_pe);
         result.entry_index = Some(k);
@@ -117,6 +117,7 @@ async fn backtest(
             &trim_years(bars, q.years),
             &strategy,
             10_000.0,
+            &FillCosts::ZERO,
         )))
     }
 }

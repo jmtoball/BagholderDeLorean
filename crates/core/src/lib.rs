@@ -120,14 +120,18 @@ impl Portfolio {
                 .sum::<f64>()
     }
 
-    /// Resolve an order to a fill and apply it.
-    pub fn execute(&mut self, order: &Order, price: f64, date: NaiveDate) {
+    /// Resolve an order to a fill and apply it, deducting `costs` from cash.
+    pub fn execute(&mut self, order: &Order, price: f64, date: NaiveDate, costs: &FillCosts) {
         match order {
-            Order::Market { ticker, qty } => self.fill(ticker, *qty, price, date),
+            Order::Market { ticker, qty } => {
+                self.cash -= costs.total(*qty, price);
+                self.fill(ticker, *qty, price, date);
+            }
             Order::TargetWeight { ticker, weight } => {
                 let equity = self.cash + self.shares(ticker) * price;
                 let delta = weight * equity / price - self.shares(ticker);
                 if delta.abs() > 1e-10 {
+                    self.cash -= costs.total(delta, price);
                     self.fill(ticker, delta, price, date);
                 }
             }
@@ -143,6 +147,23 @@ impl Portfolio {
                 lots.iter().map(|l| l.qty * (p - l.entry_price)).sum::<f64>()
             })
             .sum()
+    }
+}
+
+/// Per-fill transaction costs: flat commission + proportional bid-ask spread.
+#[derive(Clone, Debug)]
+pub struct FillCosts {
+    /// Flat commission per order (same currency as portfolio cash).
+    pub commission: f64,
+    /// One-way spread cost as a fraction of notional (e.g. 0.0001 = 1 bp).
+    pub spread_fraction: f64,
+}
+
+impl FillCosts {
+    pub const ZERO: Self = Self { commission: 0.0, spread_fraction: 0.0 };
+
+    fn total(&self, qty: f64, price: f64) -> f64 {
+        self.commission + self.spread_fraction * qty.abs() * price
     }
 }
 
@@ -324,6 +345,7 @@ pub fn run_portfolio_backtest(
     bars: &[Bar],
     strategy: &Strategy,
     initial_cash: f64,
+    costs: &FillCosts,
 ) -> BacktestResult {
     let mut gen = strategy.clone().into_generator();
     let mut portfolio = Portfolio::new(initial_cash);
@@ -340,6 +362,7 @@ pub fn run_portfolio_backtest(
             &Order::TargetWeight { ticker: ticker.to_owned(), weight },
             bar.close,
             bar.date,
+            costs,
         );
     }
 
@@ -573,10 +596,10 @@ mod tests {
     fn order_market_buy_and_sell() {
         let d: NaiveDate = "2024-01-01".parse().unwrap();
         let mut p = Portfolio::new(1000.0);
-        p.execute(&Order::Market { ticker: "X".into(), qty: 5.0 }, 100.0, d);
+        p.execute(&Order::Market { ticker: "X".into(), qty: 5.0 }, 100.0, d, &FillCosts::ZERO);
         assert!((p.shares("X") - 5.0).abs() < 1e-9);
         assert!((p.cash - 500.0).abs() < 1e-9);
-        p.execute(&Order::Market { ticker: "X".into(), qty: -5.0 }, 120.0, d);
+        p.execute(&Order::Market { ticker: "X".into(), qty: -5.0 }, 120.0, d, &FillCosts::ZERO);
         assert!(p.shares("X").abs() < 1e-9);
         assert!((p.realized_pnl - 100.0).abs() < 1e-9); // 5 * (120 - 100)
     }
@@ -585,19 +608,37 @@ mod tests {
     fn order_target_weight_allocates_full_equity() {
         let d: NaiveDate = "2024-01-01".parse().unwrap();
         let mut p = Portfolio::new(1000.0);
-        p.execute(&Order::TargetWeight { ticker: "X".into(), weight: 1.0 }, 50.0, d);
+        p.execute(&Order::TargetWeight { ticker: "X".into(), weight: 1.0 }, 50.0, d, &FillCosts::ZERO);
         assert!((p.shares("X") - 20.0).abs() < 1e-9); // 1000 / 50
         assert!(p.cash.abs() < 1e-9);
         // reduce to 50% weight at new price
-        p.execute(&Order::TargetWeight { ticker: "X".into(), weight: 0.5 }, 50.0, d);
+        p.execute(&Order::TargetWeight { ticker: "X".into(), weight: 0.5 }, 50.0, d, &FillCosts::ZERO);
         assert!((p.shares("X") - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn flat_commission_reduces_equity() {
+        // Buy 10 shares @ 100 costs $10 commission → cash = -10, equity at bar 1 = 990/1000.
+        let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 100.0)];
+        let costs = FillCosts { commission: 10.0, spread_fraction: 0.0 };
+        let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs);
+        assert!((r.curve.last().unwrap().equity - 0.99).abs() < 1e-9);
+    }
+
+    #[test]
+    fn spread_fraction_reduces_equity() {
+        // 1% spread on 10 shares @ 100 = $10 → same result as commission test.
+        let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 100.0)];
+        let costs = FillCosts { commission: 0.0, spread_fraction: 0.01 };
+        let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs);
+        assert!((r.curve.last().unwrap().equity - 0.99).abs() < 1e-9);
     }
 
     #[test]
     fn portfolio_backtest_parity_with_legacy() {
         let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 110.0), bar("2020-01-03", 121.0)];
         let legacy = run_backtest(&bars, &Strategy::BuyAndHold);
-        let new = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10000.0);
+        let new = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10000.0, &FillCosts::ZERO);
         for (l, p) in legacy.curve.iter().zip(new.curve.iter()) {
             assert!((l.equity - p.equity).abs() < 1e-9, "mismatch at {}", l.date);
         }
@@ -613,7 +654,7 @@ mod tests {
             .collect();
         let strategy = Strategy::SmaCrossover { fast: 2, slow: 4 };
         let legacy = run_backtest(&bars, &strategy);
-        let new = run_portfolio_backtest("X", &bars, &strategy, 1000.0);
+        let new = run_portfolio_backtest("X", &bars, &strategy, 1000.0, &FillCosts::ZERO);
         for (l, p) in legacy.curve.iter().zip(new.curve.iter()) {
             assert!((l.equity - p.equity).abs() < 1e-9, "SMA mismatch at {}", l.date);
         }
