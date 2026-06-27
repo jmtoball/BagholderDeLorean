@@ -1,0 +1,10 @@
+[package]
+name = "bagholder-web"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bagholder-core = { path = "../core" }
+leptos = { version = "0.6", features = ["csr"] }
+gloo-net = { version = "0.6", features = ["http"] }
+console_error_panic_hook = "0.1"

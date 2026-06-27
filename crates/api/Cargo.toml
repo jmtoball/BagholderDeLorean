@@ -1,0 +1,13 @@
+[package]
+name = "bagholder-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bagholder-core = { path = "../core" }
+bagholder-data = { path = "../data" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }

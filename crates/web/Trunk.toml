@@ -1,0 +1,9 @@
+[build]
+target = "index.html"
+
+[serve]
+port = 8080
+
+# Forward API calls to the axum server during `trunk serve`.
+[[proxy]]
+backend = "http://127.0.0.1:3000/api"
