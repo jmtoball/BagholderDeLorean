@@ -10,7 +10,7 @@ const CHART_H: f64 = 240.0;
 
 #[component]
 fn App() -> impl IntoView {
-    let (ticker, set_ticker) = create_signal("AAPL.US".to_string());
+    let (ticker, set_ticker) = create_signal("AAPL".to_string());
     let (strategy, set_strategy) = create_signal("buy_and_hold".to_string());
     let (fast, set_fast) = create_signal(20usize);
     let (slow, set_slow) = create_signal(50usize);

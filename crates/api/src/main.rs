@@ -9,7 +9,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use bagholder_core::{run_backtest, BacktestResult, Fundamental, Strategy};
+use bagholder_core::{run_backtest, BacktestResult, Candidate, Fundamental, Strategy};
 use bagholder_data::Store;
 use serde::Deserialize;
 use tower_http::{cors::CorsLayer, services::ServeDir};
@@ -70,6 +70,36 @@ async fn fundamentals(
     Ok(Json(funds))
 }
 
+#[derive(Deserialize)]
+struct ScreenQuery {
+    // Only "low_pe" exists today; kept so the URL is self-describing and future
+    // screens slot in without a breaking change.
+    #[serde(default)]
+    kind: String,
+    #[serde(default = "default_limit")]
+    limit: usize,
+}
+
+fn default_limit() -> usize {
+    10
+}
+
+async fn screen(
+    State(db): State<Db>,
+    Query(q): Query<ScreenQuery>,
+) -> Result<Json<Vec<Candidate>>, (StatusCode, String)> {
+    if !q.kind.is_empty() && q.kind != "low_pe" {
+        return Err((StatusCode::BAD_REQUEST, format!("unknown screen: {}", q.kind)));
+    }
+    let candidates = tokio::task::spawn_blocking(move || {
+        bagholder_data::low_pe(&db.lock().unwrap(), bagholder_data::DEFAULT_UNIVERSE, q.limit)
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
+    Ok(Json(candidates))
+}
+
 fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
@@ -83,6 +113,7 @@ async fn main() {
     let app = Router::new()
         .route("/api/backtest", get(backtest))
         .route("/api/fundamentals", get(fundamentals))
+        .route("/api/screen", get(screen))
         // Serve the trunk-built frontend. Run `trunk build` in crates/web first.
         .fallback_service(ServeDir::new("crates/web/dist"))
         .layer(CorsLayer::permissive())

@@ -2,7 +2,9 @@
 //! API crate calls these off the async runtime via `spawn_blocking`. Kept out
 //! of the WASM web crate.
 
+mod screen;
 mod store;
+pub use screen::{low_pe, DEFAULT_UNIVERSE};
 pub use store::Store;
 
 use std::collections::HashMap;
@@ -12,51 +14,109 @@ use bagholder_core::{Bar, Fundamental};
 use chrono::NaiveDate;
 use serde::Deserialize;
 
-/// Daily OHLCV straight from Stooq (free, no API key). Ticker uses Stooq's
-/// suffix format, e.g. "AAPL.US", "SPY.US", "BMW.DE". Prefer `Store::ohlcv`,
-/// which caches these results; this is the raw network fetch.
-pub fn download_ohlcv(ticker: &str) -> Result<Vec<Bar>> {
-    let url = format!("https://stooq.com/q/d/l/?s={ticker}&i=d");
-    let body = reqwest::blocking::get(&url)
+/// Daily OHLCV from Yahoo Finance's chart API (free, no key). `symbol` is a
+/// plain Yahoo ticker, e.g. "AAPL", "BRK-B". Close is split/dividend-adjusted
+/// for correct return math; open/high/low are raw. Prefer `Store::ohlcv`, which
+/// caches this; this is the raw network fetch.
+///
+/// ponytail: the v8 chart endpoint is undocumented but stable and keyless. If
+/// Yahoo starts rate-limiting bursts, add a small backoff or a paid feed.
+pub fn download_ohlcv(symbol: &str) -> Result<Vec<Bar>> {
+    let url =
+        format!("https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=max&interval=1d");
+    let body = reqwest::blocking::Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; BagholderDeLorean/0.1)")
+        .build()?
+        .get(&url)
+        .send()
         .with_context(|| format!("requesting {url}"))?
         .error_for_status()?
         .text()?;
-    parse_stooq_csv(&body)
+    parse_yahoo_chart(&body)
 }
 
-#[derive(Debug, Deserialize)]
-struct StooqRow {
-    #[serde(rename = "Date")]
-    date: NaiveDate,
-    #[serde(rename = "Open")]
-    open: f64,
-    #[serde(rename = "High")]
-    high: f64,
-    #[serde(rename = "Low")]
-    low: f64,
-    #[serde(rename = "Close")]
-    close: f64,
-    #[serde(rename = "Volume")]
-    volume: f64,
-}
-
-fn parse_stooq_csv(body: &str) -> Result<Vec<Bar>> {
-    // Stooq answers a bad ticker with a plain "No data" line, not a CSV.
-    if body.trim_start().starts_with("No data") {
-        anyhow::bail!("stooq returned no data (unknown ticker?)");
+fn parse_yahoo_chart(body: &str) -> Result<Vec<Bar>> {
+    #[derive(Deserialize)]
+    struct Resp {
+        chart: Chart,
     }
-    let mut rdr = csv::Reader::from_reader(body.as_bytes());
-    let mut bars = Vec::new();
-    for rec in rdr.deserialize() {
-        let r: StooqRow = rec.context("parsing stooq CSV row")?;
+    #[derive(Deserialize)]
+    struct Chart {
+        result: Option<Vec<ChartResult>>,
+        error: Option<serde_json::Value>,
+    }
+    #[derive(Deserialize)]
+    struct ChartResult {
+        timestamp: Option<Vec<i64>>,
+        indicators: Indicators,
+    }
+    #[derive(Deserialize)]
+    struct Indicators {
+        quote: Vec<Quote>,
+        #[serde(default)]
+        adjclose: Vec<AdjClose>,
+    }
+    #[derive(Deserialize)]
+    struct Quote {
+        open: Vec<Option<f64>>,
+        high: Vec<Option<f64>>,
+        low: Vec<Option<f64>>,
+        close: Vec<Option<f64>>,
+        volume: Vec<Option<f64>>,
+    }
+    #[derive(Deserialize)]
+    struct AdjClose {
+        adjclose: Vec<Option<f64>>,
+    }
+
+    let resp: Resp = serde_json::from_str(body).context("parsing yahoo chart JSON")?;
+    if let Some(err) = resp.chart.error {
+        anyhow::bail!("yahoo chart error: {err}");
+    }
+    let result = resp
+        .chart
+        .result
+        .and_then(|mut rs| rs.pop())
+        .context("yahoo returned no chart result (unknown symbol?)")?;
+    let ts = result.timestamp.unwrap_or_default();
+    let q = result
+        .indicators
+        .quote
+        .into_iter()
+        .next()
+        .context("yahoo returned no quote series")?;
+    let adj = result.indicators.adjclose.into_iter().next().map(|a| a.adjclose);
+
+    let mut bars = Vec::with_capacity(ts.len());
+    for i in 0..ts.len() {
+        // Skip rows with any missing core value (holidays, the in-progress day).
+        let (Some(open), Some(high), Some(low), Some(close)) = (
+            q.open.get(i).copied().flatten(),
+            q.high.get(i).copied().flatten(),
+            q.low.get(i).copied().flatten(),
+            q.close.get(i).copied().flatten(),
+        ) else {
+            continue;
+        };
+        let date = chrono::DateTime::from_timestamp(ts[i], 0)
+            .context("invalid timestamp from yahoo")?
+            .date_naive();
+        // Adjusted close for split/div-correct returns; fall back to raw close.
+        let close = adj
+            .as_ref()
+            .and_then(|a| a.get(i).copied().flatten())
+            .unwrap_or(close);
         bars.push(Bar {
-            date: r.date,
-            open: r.open,
-            high: r.high,
-            low: r.low,
-            close: r.close,
-            volume: r.volume,
+            date,
+            open,
+            high,
+            low,
+            close,
+            volume: q.volume.get(i).copied().flatten().unwrap_or(0.0),
         });
+    }
+    if bars.is_empty() {
+        anyhow::bail!("yahoo returned no usable bars");
     }
     Ok(bars)
 }
@@ -198,18 +258,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_stooq_csv() {
-        let csv = "Date,Open,High,Low,Close,Volume\n\
-                   2020-01-02,7.0,7.2,6.9,7.1,100\n\
-                   2020-01-03,7.1,7.3,7.0,7.25,120\n";
-        let bars = parse_stooq_csv(csv).unwrap();
+    fn parses_yahoo_chart_using_adjclose_and_skipping_gaps() {
+        // Third row has a null close (e.g. the in-progress day) -> dropped.
+        let json = r#"{"chart":{"error":null,"result":[{
+          "timestamp":[1577923200,1578009600,1578095600],
+          "indicators":{
+            "quote":[{"open":[7.0,7.1,7.3],"high":[7.2,7.3,7.4],
+                      "low":[6.9,7.0,7.1],"close":[7.1,7.25,null],"volume":[100,120,130]}],
+            "adjclose":[{"adjclose":[6.5,6.6,null]}]
+          }}]}}"#;
+        let bars = parse_yahoo_chart(json).unwrap();
         assert_eq!(bars.len(), 2);
-        assert_eq!(bars[1].close, 7.25);
+        assert_eq!(bars[0].date, "2020-01-02".parse::<NaiveDate>().unwrap());
+        assert_eq!(bars[1].close, 6.6); // adjusted close, not raw 7.25
     }
 
     #[test]
-    fn rejects_no_data_response() {
-        assert!(parse_stooq_csv("No data\n").is_err());
+    fn rejects_unknown_symbol() {
+        let json = r#"{"chart":{"result":null,"error":{"code":"Not Found"}}}"#;
+        assert!(parse_yahoo_chart(json).is_err());
     }
 
     #[test]

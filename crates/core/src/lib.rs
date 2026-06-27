@@ -28,6 +28,28 @@ pub struct Fundamental {
     pub value: f64,
 }
 
+/// Trailing-twelve-month price/earnings from the latest close and the four most
+/// recent quarterly EPS figures (most-recent-first). `None` when EPS history is
+/// short or trailing earnings are non-positive (P/E is then undefined).
+pub fn pe_ttm(latest_close: f64, eps_quarters_recent_first: &[f64]) -> Option<f64> {
+    if eps_quarters_recent_first.len() < 4 {
+        return None;
+    }
+    let ttm: f64 = eps_quarters_recent_first[..4].iter().sum();
+    (ttm > 0.0).then_some(latest_close / ttm)
+}
+
+/// One screener hit: a company's P/E and how it sits versus its industry.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Candidate {
+    pub ticker: String,
+    pub industry: String,
+    pub pe: f64,
+    pub industry_median_pe: f64,
+    /// pe / industry_median_pe; < 1 means cheaper than industry peers.
+    pub relative_pe: f64,
+}
+
 /// Built-in strategies. An enum (not a trait) so the web form can serialize a
 /// choice directly. ponytail: swap to a `trait Strategy` + registry only when
 /// users need to plug in their own.
@@ -186,6 +208,13 @@ mod tests {
         assert!((r.curve.last().unwrap().equity - 1.21).abs() < 1e-9);
         assert!((r.metrics.total_return - 0.21).abs() < 1e-9);
         assert!(r.metrics.max_drawdown.abs() < 1e-9); // monotonic up => no drawdown
+    }
+
+    #[test]
+    fn pe_ttm_sums_four_quarters_and_guards_losses() {
+        assert_eq!(pe_ttm(100.0, &[1.0, 1.0, 1.0, 1.0, 5.0]), Some(25.0)); // uses newest 4
+        assert_eq!(pe_ttm(100.0, &[1.0, 1.0]), None); // too few quarters
+        assert_eq!(pe_ttm(100.0, &[-1.0, -1.0, 0.0, 0.0]), None); // non-positive TTM
     }
 
     #[test]
