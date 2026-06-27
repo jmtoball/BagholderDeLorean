@@ -120,6 +120,20 @@ impl Portfolio {
                 .sum::<f64>()
     }
 
+    /// Resolve an order to a fill and apply it.
+    pub fn execute(&mut self, order: &Order, price: f64, date: NaiveDate) {
+        match order {
+            Order::Market { ticker, qty } => self.fill(ticker, *qty, price, date),
+            Order::TargetWeight { ticker, weight } => {
+                let equity = self.cash + self.shares(ticker) * price;
+                let delta = weight * equity / price - self.shares(ticker);
+                if delta.abs() > 1e-10 {
+                    self.fill(ticker, delta, price, date);
+                }
+            }
+        }
+    }
+
     /// Sum of unrealized gains/losses at current prices.
     pub fn unrealized_pnl(&self, prices: &HashMap<String, f64>) -> f64 {
         self.positions
@@ -130,6 +144,16 @@ impl Portfolio {
             })
             .sum()
     }
+}
+
+/// Order intent, resolved to a Portfolio fill at execution time.
+#[derive(Clone, Debug)]
+pub enum Order {
+    /// Transact a fixed share count (positive = buy, negative = sell).
+    Market { ticker: String, qty: f64 },
+    /// Rebalance ticker to `weight` fraction of current portfolio equity.
+    /// ponytail: equity uses only this ticker's price — multi-asset needs a prices map (E1).
+    TargetWeight { ticker: String, weight: f64 },
 }
 
 /// Built-in strategies. An enum (not a trait) so the web form can serialize a
@@ -268,11 +292,11 @@ pub fn run_portfolio_backtest(
         curve.push(EquityPoint { date: bars[i].date, equity: eq / initial_cash });
 
         // Rebalance to signal[i]; fills at today's close, earns tomorrow's return.
-        let target = signals[i] * eq / closes[i];
-        let delta = target - portfolio.shares(ticker);
-        if delta.abs() > 1e-10 {
-            portfolio.fill(ticker, delta, closes[i], bars[i].date);
-        }
+        portfolio.execute(
+            &Order::TargetWeight { ticker: ticker.to_owned(), weight: signals[i] },
+            closes[i],
+            bars[i].date,
+        );
     }
 
     let rets: Vec<f64> = curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect();
@@ -484,6 +508,30 @@ mod tests {
         assert_eq!(pe_ttm(100.0, &[1.0, 1.0, 1.0, 1.0, 5.0]), Some(25.0)); // uses newest 4
         assert_eq!(pe_ttm(100.0, &[1.0, 1.0]), None); // too few quarters
         assert_eq!(pe_ttm(100.0, &[-1.0, -1.0, 0.0, 0.0]), None); // non-positive TTM
+    }
+
+    #[test]
+    fn order_market_buy_and_sell() {
+        let d: NaiveDate = "2024-01-01".parse().unwrap();
+        let mut p = Portfolio::new(1000.0);
+        p.execute(&Order::Market { ticker: "X".into(), qty: 5.0 }, 100.0, d);
+        assert!((p.shares("X") - 5.0).abs() < 1e-9);
+        assert!((p.cash - 500.0).abs() < 1e-9);
+        p.execute(&Order::Market { ticker: "X".into(), qty: -5.0 }, 120.0, d);
+        assert!(p.shares("X").abs() < 1e-9);
+        assert!((p.realized_pnl - 100.0).abs() < 1e-9); // 5 * (120 - 100)
+    }
+
+    #[test]
+    fn order_target_weight_allocates_full_equity() {
+        let d: NaiveDate = "2024-01-01".parse().unwrap();
+        let mut p = Portfolio::new(1000.0);
+        p.execute(&Order::TargetWeight { ticker: "X".into(), weight: 1.0 }, 50.0, d);
+        assert!((p.shares("X") - 20.0).abs() < 1e-9); // 1000 / 50
+        assert!(p.cash.abs() < 1e-9);
+        // reduce to 50% weight at new price
+        p.execute(&Order::TargetWeight { ticker: "X".into(), weight: 0.5 }, 50.0, d);
+        assert!((p.shares("X") - 10.0).abs() < 1e-9);
     }
 
     #[test]
