@@ -10,7 +10,8 @@ use axum::{
     Json, Router,
 };
 use bagholder_core::{
-    local_minima, pe_series, run_backtest, Bar, BacktestResult, Candidate, Fundamental, Strategy,
+    local_minima, pe_history, pe_series, run_backtest, Bar, BacktestResult, Candidate, Fundamental,
+    PeHistory, Strategy,
 };
 use bagholder_data::Store;
 use serde::Deserialize;
@@ -133,6 +134,30 @@ async fn fundamentals(
 }
 
 #[derive(Deserialize)]
+struct PeHistoryQuery {
+    ticker: String,
+    pe_window: Option<usize>,
+}
+
+async fn pe_history_handler(
+    State(db): State<Db>,
+    Query(q): Query<PeHistoryQuery>,
+) -> Result<Json<PeHistory>, (StatusCode, String)> {
+    let ticker = q.ticker.clone();
+    let window = q.pe_window.unwrap_or(63);
+    let (bars, eps) = tokio::task::spawn_blocking(move || {
+        let db = db.lock().unwrap();
+        let bars = db.ohlcv(&ticker)?;
+        let eps = quarterly_eps(&db.fundamentals(&ticker)?);
+        Ok::<_, anyhow::Error>((bars, eps))
+    })
+    .await
+    .map_err(internal)?
+    .map_err(internal)?;
+    Ok(Json(pe_history(&bars, &eps, window)))
+}
+
+#[derive(Deserialize)]
 struct ScreenQuery {
     // Only "low_pe" exists today; kept so the URL is self-describing and future
     // screens slot in without a breaking change.
@@ -175,6 +200,7 @@ async fn main() {
     let app = Router::new()
         .route("/api/backtest", get(backtest))
         .route("/api/fundamentals", get(fundamentals))
+        .route("/api/pe_history", get(pe_history_handler))
         .route("/api/screen", get(screen))
         // Serve the trunk-built frontend. Run `trunk build` in crates/web first.
         .fallback_service(ServeDir::new("crates/web/dist"))

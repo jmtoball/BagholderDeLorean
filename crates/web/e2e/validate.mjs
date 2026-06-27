@@ -69,6 +69,14 @@ if (entriesShown < 1) fail('pe_min: no entry dates in legend');
 console.log(`OK: local-min entry legend shows ${entriesShown} entry dates`);
 await page.screenshot({ path: `${SHOT}/04-pe-min.png`, fullPage: true });
 
+// --- P/E charts: troughs as dots, current entry highlighted red ---
+await page.waitForSelector('svg circle', { timeout: 30000 });
+const troughDots = await page.locator('svg circle').count();
+const entryDots = await page.locator('svg circle[fill="#dc2626"]').count();
+if (entryDots < 1) fail('P/E chart: no highlighted entry trough');
+console.log(`OK: P/E charts drew ${troughDots} trough dots, ${entryDots} highlighted entries`);
+await page.screenshot({ path: `${SHOT}/06-pe-chart.png`, fullPage: true });
+
 // --- Step to an older trough; wait for the legend entry dates to actually
 // re-render (the trough label flips on click, before the re-fetch completes,
 // so assert on the legend, not the label). ---

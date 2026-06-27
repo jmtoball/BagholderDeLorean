@@ -193,6 +193,38 @@ pub fn pe_series(bars: &[Bar], eps_q: &[(NaiveDate, f64)]) -> Vec<(NaiveDate, f6
     out
 }
 
+/// One point on a P/E-over-time series (used for charting).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PePoint {
+    pub date: NaiveDate,
+    pub pe: f64,
+}
+
+/// A P/E series plus its troughs, ready to plot.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PeHistory {
+    pub series: Vec<PePoint>,
+    pub troughs: Vec<PePoint>,
+}
+
+/// Build the P/E-over-time series and its troughs — same inputs and window as
+/// `pe_series` / `local_minima`, packaged for the chart.
+pub fn pe_history(bars: &[Bar], eps_q: &[(NaiveDate, f64)], window: usize) -> PeHistory {
+    let s = pe_series(bars, eps_q);
+    let troughs = local_minima(&s, window)
+        .into_iter()
+        .map(|i| PePoint {
+            date: s[i].0,
+            pe: s[i].1,
+        })
+        .collect();
+    let series = s
+        .into_iter()
+        .map(|(date, pe)| PePoint { date, pe })
+        .collect();
+    PeHistory { series, troughs }
+}
+
 /// Indices of local minima (troughs) in a `(date, value)` series: a point that
 /// is the smallest within a full ±`window` neighbourhood. Points within `window`
 /// of either end are excluded — a trough must be *confirmed* by later data, so a
@@ -296,6 +328,25 @@ mod tests {
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].0, "2021-01-15".parse::<NaiveDate>().unwrap());
         assert!((s[0].1 - 20.0).abs() < 1e-9); // 80 / 4
+    }
+
+    #[test]
+    fn pe_history_marks_troughs() {
+        let eps: Vec<(NaiveDate, f64)> = ["2019-03-31", "2019-06-30", "2019-09-30", "2019-12-31"]
+            .iter()
+            .map(|d| (d.parse().unwrap(), 0.25)) // TTM EPS = 1.0 -> pe == close
+            .collect();
+        let closes = [5.0, 3.0, 4.0, 2.0, 6.0, 1.0, 7.0];
+        let bars: Vec<Bar> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| bar(&format!("2020-01-{:02}", i + 1), c))
+            .collect();
+        let h = pe_history(&bars, &eps, 1);
+        assert_eq!(h.series.len(), 7);
+        assert!((h.series[0].pe - 5.0).abs() < 1e-9);
+        let tvals: Vec<f64> = h.troughs.iter().map(|t| t.pe).collect();
+        assert_eq!(tvals, vec![3.0, 2.0, 1.0]); // the troughs
     }
 
     #[test]

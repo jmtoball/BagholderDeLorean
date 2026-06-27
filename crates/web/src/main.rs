@@ -4,10 +4,10 @@
 //! Reuses bagholder-core's DTOs so API JSON deserializes into typed structs.
 //! Charts are inline SVG polylines — no charting dependency.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use bagholder_core::{BacktestResult, Candidate};
-use chrono::Datelike;
+use bagholder_core::{BacktestResult, Candidate, PeHistory};
+use chrono::{Datelike, NaiveDate};
 use leptos::*;
 use serde::de::DeserializeOwned;
 
@@ -108,6 +108,67 @@ fn equity_overlay(series: &[(String, BacktestResult)]) -> View {
     .into_view()
 }
 
+/// A compact P/E-over-time chart: the series as a line, troughs as dots, and
+/// the current entry trough highlighted in red. Low P/E sits at the bottom.
+fn pe_chart(ticker: &str, h: &PeHistory, entry: Option<NaiveDate>) -> View {
+    if h.series.len() < 2 {
+        return view! { <p style="font-size:.85rem;color:#999">{ticker.to_string()}": no P/E history"</p> }.into_view();
+    }
+    let (w, ht) = (720.0, 120.0);
+    let (mut dmin, mut dmax) = (i32::MAX, i32::MIN);
+    let (mut pmin, mut pmax) = (f64::MAX, f64::MIN);
+    for p in &h.series {
+        let d = p.date.num_days_from_ce();
+        dmin = dmin.min(d);
+        dmax = dmax.max(d);
+        pmin = pmin.min(p.pe);
+        pmax = pmax.max(p.pe);
+    }
+    let dspan = (dmax - dmin).max(1) as f64;
+    let pspan = (pmax - pmin).max(1e-9);
+    let xy = move |date: NaiveDate, pe: f64| {
+        let x = (date.num_days_from_ce() - dmin) as f64 / dspan * w;
+        let y = ht - (pe - pmin) / pspan * ht; // low P/E -> bottom
+        (x, y)
+    };
+
+    let line: String = h
+        .series
+        .iter()
+        .map(|p| {
+            let (x, y) = xy(p.date, p.pe);
+            format!("{x:.1},{y:.1} ")
+        })
+        .collect();
+    let dots = h
+        .troughs
+        .iter()
+        .map(|t| {
+            let (x, y) = xy(t.date, t.pe);
+            let (r, fill) = if entry == Some(t.date) {
+                ("4", "#dc2626")
+            } else {
+                ("2.5", "#888")
+            };
+            view! { <circle cx=format!("{x:.1}") cy=format!("{y:.1}") r=r fill=fill /> }
+        })
+        .collect_view();
+
+    view! {
+        <div style="margin-bottom:.75rem">
+            <div style="font-size:.85rem;font-weight:600">
+                {ticker.to_string()}" — P/E "{format!("(range {pmin:.1}–{pmax:.1})")}
+            </div>
+            <svg viewBox=format!("0 0 {w} {ht}") preserveAspectRatio="none"
+                 style="border:1px solid #eee;width:100%;height:80px">
+                <polyline points=line fill="none" stroke="#555" stroke-width="1" />
+                {dots}
+            </svg>
+        </div>
+    }
+    .into_view()
+}
+
 #[component]
 fn App() -> impl IntoView {
     let category = create_rw_signal("price".to_string());
@@ -127,6 +188,7 @@ fn App() -> impl IntoView {
     let overlay = create_rw_signal::<Vec<(String, BacktestResult)>>(Vec::new());
     let pe_entry = create_rw_signal(false); // enter at each name's local-min P/E
     let pe_index = create_rw_signal(0usize); // which trough, 0 = most recent
+    let pe_hist = create_rw_signal::<HashMap<String, PeHistory>>(HashMap::new()); // per-ticker, cached
 
     let run_price = move |_| {
         let url = format!(
@@ -148,6 +210,7 @@ fn App() -> impl IntoView {
         busy.set(true);
         selected.update(|s| s.clear());
         overlay.set(Vec::new());
+        pe_hist.update(|m| m.clear());
         spawn_local(async move {
             let res = get_json::<Vec<Candidate>>("/api/screen?kind=low_pe&limit=12").await;
             candidates.set(Some(res));
@@ -159,20 +222,32 @@ fn App() -> impl IntoView {
     // trough (0 = most recent); otherwise use the fixed timeframe.
     let run_selected_k = move |k: usize| {
         let tickers: Vec<String> = selected.get().into_iter().collect();
-        let entry = if pe_entry.get() {
+        let use_pe = pe_entry.get();
+        let entry = if use_pe {
             format!("&entry=pe_min&pe_index={k}")
         } else {
             format!("&years={}", years.get())
         };
+        // P/E history is identical across steps — fetch each ticker's once.
+        let cached: HashSet<String> = pe_hist.get().keys().cloned().collect();
         pe_index.set(k);
         busy.set(true);
         spawn_local(async move {
             let mut out = Vec::new();
+            let mut new_hist: Vec<(String, PeHistory)> = Vec::new();
             for t in tickers {
                 let url = format!("/api/backtest?ticker={t}&strategy=buy_and_hold{entry}");
                 if let Ok(r) = get_json::<BacktestResult>(&url).await {
-                    out.push((t, r));
+                    out.push((t.clone(), r));
                 }
+                if use_pe && !cached.contains(&t) {
+                    if let Ok(h) = get_json::<PeHistory>(&format!("/api/pe_history?ticker={t}")).await {
+                        new_hist.push((t, h));
+                    }
+                }
+            }
+            if !new_hist.is_empty() {
+                pe_hist.update(|m| m.extend(new_hist));
             }
             overlay.set(out);
             busy.set(false);
@@ -336,6 +411,26 @@ fn App() -> impl IntoView {
                         }
                     }}
                     {move || { let o = overlay.get(); (!o.is_empty()).then(|| equity_overlay(&o)) }}
+
+                    // P/E-over-time charts with troughs marked (pe_min mode only)
+                    {move || {
+                        let results = overlay.get();
+                        let hist = pe_hist.get();
+                        (pe_entry.get() && !results.is_empty()).then(|| {
+                            let charts = results
+                                .iter()
+                                .filter_map(|(t, r)| hist.get(t).map(|h| pe_chart(t, h, r.entry_date)))
+                                .collect_view();
+                            view! {
+                                <div style="margin-top:1rem">
+                                    <div style="font-size:.85rem;color:#666;margin-bottom:.4rem">
+                                        "P/E over time — dots are troughs, red is the current entry (lower = cheaper)"
+                                    </div>
+                                    {charts}
+                                </div>
+                            }
+                        })
+                    }}
                 </section>
             })}
         </main>
