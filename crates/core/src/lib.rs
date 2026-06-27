@@ -306,6 +306,11 @@ pub struct Metrics {
     pub cagr: f64,
     pub max_drawdown: f64,
     pub sharpe: f64,
+    /// Sortino ratio: annualized mean return / annualized downside deviation.
+    /// `f64::INFINITY` when there are no negative returns.
+    pub sortino: f64,
+    /// Total return divided by absolute max drawdown. Undefined (0.0) when max_drawdown is 0.
+    pub recovery_factor: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -537,16 +542,26 @@ fn compute_metrics(curve: &[EquityPoint], rets: &[f64]) -> Metrics {
         max_drawdown = f64::min(max_drawdown, dd);
     }
 
-    let sharpe = if rets.len() > 1 {
+    let (sharpe, sortino) = if rets.len() > 1 {
         let n = rets.len() as f64;
         let mean = rets.iter().sum::<f64>() / n;
         let var = rets.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1.0);
         let sd = var.sqrt();
-        if sd > 0.0 {
-            mean / sd * 252f64.sqrt() // annualized from daily
+        let sharpe = if sd > 0.0 { mean / sd * 252f64.sqrt() } else { 0.0 };
+        // Sortino: downside deviation uses only negative excess returns (target = 0).
+        let downside_var = rets.iter().map(|r| r.min(0.0).powi(2)).sum::<f64>() / n;
+        let sortino = if downside_var > 0.0 {
+            mean * 252f64.sqrt() / downside_var.sqrt()
         } else {
-            0.0
-        }
+            f64::INFINITY
+        };
+        (sharpe, sortino)
+    } else {
+        (0.0, 0.0)
+    };
+
+    let recovery_factor = if max_drawdown < 0.0 {
+        total_return / max_drawdown.abs()
     } else {
         0.0
     };
@@ -556,6 +571,8 @@ fn compute_metrics(curve: &[EquityPoint], rets: &[f64]) -> Metrics {
         cagr,
         max_drawdown,
         sharpe,
+        sortino,
+        recovery_factor,
     }
 }
 
@@ -572,6 +589,31 @@ mod tests {
             close: c,
             volume: 0.0,
         }
+    }
+
+    #[test]
+    fn sortino_and_recovery_factor() {
+        // Rising then falling: one negative return → Sortino < Sharpe; drawdown exists → recovery > 0.
+        let bars = vec![
+            bar("2020-01-01", 100.0),
+            bar("2020-01-02", 110.0),
+            bar("2020-01-03", 90.0),
+        ];
+        let r = run_backtest(&bars, &Strategy::BuyAndHold);
+        assert!(r.metrics.sharpe.is_finite());
+        assert!(r.metrics.sortino.is_finite());
+        // One negative return → downside dev > 0 → Sortino is finite and positive if total > 0.
+        assert!(r.metrics.max_drawdown < 0.0);
+        assert!(r.metrics.recovery_factor != 0.0);
+        // Monotonically rising: all returns positive → Sortino = ∞.
+        let bars_up = vec![
+            bar("2020-01-01", 100.0),
+            bar("2020-01-02", 110.0),
+            bar("2020-01-03", 121.0),
+        ];
+        let r_up = run_backtest(&bars_up, &Strategy::BuyAndHold);
+        assert_eq!(r_up.metrics.sortino, f64::INFINITY);
+        assert_eq!(r_up.metrics.recovery_factor, 0.0); // no drawdown
     }
 
     #[test]
