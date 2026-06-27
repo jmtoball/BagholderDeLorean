@@ -202,6 +202,55 @@ impl Allocation {
     }
 }
 
+/// Drift bands for the 5/25 rebalancing rule (absolute + relative thresholds).
+#[derive(Clone, Debug)]
+pub struct BandConfig {
+    /// Maximum absolute drift from target weight (e.g. 0.05 = 5 percentage points).
+    pub absolute: f64,
+    /// Maximum relative drift from target weight (e.g. 0.25 = 25%).
+    pub relative: f64,
+}
+
+/// Controls when a rebalance is triggered.
+#[derive(Clone, Debug, Default)]
+pub struct RebalanceConfig {
+    /// Trigger if this many calendar days have elapsed since the last rebalance.
+    pub calendar_days: Option<u32>,
+    /// Trigger if any position drifts beyond these bands.
+    pub bands: Option<BandConfig>,
+    /// If true, rebalance ALL positions when triggered; if false, only drifted ones.
+    pub full: bool,
+}
+
+/// Returns true when the portfolio needs to be rebalanced according to `config`.
+pub fn needs_rebalance(
+    portfolio: &Portfolio,
+    alloc: &Allocation,
+    prices: &HashMap<String, f64>,
+    config: &RebalanceConfig,
+    last_rebalance: NaiveDate,
+    today: NaiveDate,
+) -> bool {
+    if let Some(days) = config.calendar_days {
+        if (today - last_rebalance).num_days() >= days as i64 {
+            return true;
+        }
+    }
+    if let Some(ref bands) = config.bands {
+        let equity = portfolio.equity(prices);
+        if equity <= 0.0 { return false; }
+        for (ticker, &target) in &alloc.0 {
+            let price = prices.get(ticker.as_str()).copied().unwrap_or(0.0);
+            let actual = portfolio.shares(ticker) * price / equity;
+            let drift = (actual - target).abs();
+            if drift > bands.absolute || (target > 0.0 && drift / target > bands.relative) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Per-fill transaction costs: flat commission, proportional spread, and
 /// square-root market impact (Almgren-Chriss model).
 #[derive(Clone, Debug)]
@@ -768,6 +817,35 @@ mod tests {
         let costs = FillCosts { spread_fraction: 0.01, ..FillCosts::ZERO };
         let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs);
         assert!((r.curve.last().unwrap().equity - 0.99).abs() < 1e-9);
+    }
+
+    #[test]
+    fn needs_rebalance_calendar_and_bands() {
+        let d0: NaiveDate = "2024-01-01".parse().unwrap();
+        let d29 = d0 + chrono::Duration::days(29);
+        let d30 = d0 + chrono::Duration::days(30);
+        let mut p = Portfolio::new(10_000.0);
+        let alloc = Allocation(HashMap::from([
+            ("X".to_string(), 0.5),
+            ("Y".to_string(), 0.5),
+        ]));
+        let prices = HashMap::from([("X".to_string(), 100.0), ("Y".to_string(), 100.0)]);
+        p.rebalance(&alloc, &prices, d0, &FillCosts::ZERO); // 50 shares each
+
+        let cal = RebalanceConfig { calendar_days: Some(30), bands: None, full: true };
+        assert!(!needs_rebalance(&p, &alloc, &prices, &cal, d0, d29));
+        assert!(needs_rebalance(&p, &alloc, &prices, &cal, d0, d30));
+
+        // X up to 130: X weight = 50*130/(50*130+50*100) = 6500/11500 ≈ 0.565 (drift 6.5pp > 5pp)
+        let prices_drifted = HashMap::from([("X".to_string(), 130.0), ("Y".to_string(), 100.0)]);
+        let no_drift = HashMap::from([("X".to_string(), 102.0), ("Y".to_string(), 100.0)]);
+        let bands = RebalanceConfig {
+            calendar_days: None,
+            bands: Some(BandConfig { absolute: 0.05, relative: 0.25 }),
+            full: true,
+        };
+        assert!(!needs_rebalance(&p, &alloc, &no_drift, &bands, d0, d0));
+        assert!(needs_rebalance(&p, &alloc, &prices_drifted, &bands, d0, d0));
     }
 
     #[test]
