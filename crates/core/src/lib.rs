@@ -4,6 +4,7 @@
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bar {
@@ -48,6 +49,87 @@ pub struct Candidate {
     pub industry_median_pe: f64,
     /// pe / industry_median_pe; < 1 means cheaper than industry peers.
     pub relative_pe: f64,
+}
+
+/// One tax lot: a batch of shares acquired at a single price.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Lot {
+    pub qty: f64,
+    pub entry_price: f64,
+    pub entry_date: NaiveDate,
+}
+
+/// Portfolio state: cash + open lots + running realized P&L.
+/// ponytail: single-currency, no margin — extend for multi-currency or leverage.
+#[derive(Clone, Debug, Default)]
+pub struct Portfolio {
+    pub cash: f64,
+    /// ticker → open lots in fill order (FIFO).
+    pub positions: HashMap<String, Vec<Lot>>,
+    pub realized_pnl: f64,
+}
+
+impl Portfolio {
+    pub fn new(cash: f64) -> Self {
+        Portfolio { cash, ..Default::default() }
+    }
+
+    /// Execute a fill: positive qty = buy, negative = sell (FIFO close).
+    pub fn fill(&mut self, ticker: &str, qty: f64, price: f64, date: NaiveDate) {
+        if qty > 0.0 {
+            self.cash -= qty * price;
+            self.positions
+                .entry(ticker.to_owned())
+                .or_default()
+                .push(Lot { qty, entry_price: price, entry_date: date });
+        } else if qty < 0.0 {
+            let mut remaining = -qty;
+            let lots = self.positions.entry(ticker.to_owned()).or_default();
+            for lot in lots.iter_mut() {
+                if remaining <= 0.0 {
+                    break;
+                }
+                let closed = lot.qty.min(remaining);
+                self.realized_pnl += closed * (price - lot.entry_price);
+                self.cash += closed * price;
+                lot.qty -= closed;
+                remaining -= closed;
+            }
+            lots.retain(|l| l.qty > 0.0);
+        }
+    }
+
+    /// Total shares held in a position.
+    pub fn shares(&self, ticker: &str) -> f64 {
+        self.positions
+            .get(ticker)
+            .map(|lots| lots.iter().map(|l| l.qty).sum())
+            .unwrap_or(0.0)
+    }
+
+    /// Cash + mark-to-market value of all open positions.
+    pub fn equity(&self, prices: &HashMap<String, f64>) -> f64 {
+        self.cash
+            + self
+                .positions
+                .iter()
+                .map(|(t, lots)| {
+                    let p = prices.get(t).copied().unwrap_or(0.0);
+                    lots.iter().map(|l| l.qty * p).sum::<f64>()
+                })
+                .sum::<f64>()
+    }
+
+    /// Sum of unrealized gains/losses at current prices.
+    pub fn unrealized_pnl(&self, prices: &HashMap<String, f64>) -> f64 {
+        self.positions
+            .iter()
+            .map(|(t, lots)| {
+                let p = prices.get(t).copied().unwrap_or(0.0);
+                lots.iter().map(|l| l.qty * (p - l.entry_price)).sum::<f64>()
+            })
+            .sum()
+    }
 }
 
 /// Built-in strategies. An enum (not a trait) so the web form can serialize a
@@ -160,6 +242,42 @@ pub fn run_backtest(bars: &[Bar], strategy: &Strategy) -> BacktestResult {
         entry_index: None,
         entry_count: None,
     }
+}
+
+/// Event-driven single-asset backtest using the portfolio state model.
+/// Processes bars in chronological order; at each bar, marks to market then
+/// rebalances to `signal * equity / price` shares at the bar's close.
+///
+/// Produces the same equity curve as `run_backtest` (verified by parity tests).
+/// ponytail: signals precomputed O(n) — swap to Strategy::next_signal() when A4
+/// lands the trait so incremental strategies don't recompute history each bar.
+pub fn run_portfolio_backtest(
+    ticker: &str,
+    bars: &[Bar],
+    strategy: &Strategy,
+    initial_cash: f64,
+) -> BacktestResult {
+    let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
+    let signals = strategy.signals(&closes);
+    let mut portfolio = Portfolio::new(initial_cash);
+    let mut curve = Vec::with_capacity(bars.len());
+
+    for i in 0..bars.len() {
+        // Mark-to-market BEFORE rebalance — today's equity reflects yesterday's position.
+        let eq = portfolio.cash + portfolio.shares(ticker) * closes[i];
+        curve.push(EquityPoint { date: bars[i].date, equity: eq / initial_cash });
+
+        // Rebalance to signal[i]; fills at today's close, earns tomorrow's return.
+        let target = signals[i] * eq / closes[i];
+        let delta = target - portfolio.shares(ticker);
+        if delta.abs() > 1e-10 {
+            portfolio.fill(ticker, delta, closes[i], bars[i].date);
+        }
+    }
+
+    let rets: Vec<f64> = curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect();
+    let metrics = compute_metrics(&curve, &rets);
+    BacktestResult { curve, metrics, entry_date: None, entry_pe: None, entry_index: None, entry_count: None }
 }
 
 /// Point-in-time trailing P/E for each bar: `close / TTM EPS`, where TTM EPS is
@@ -366,6 +484,59 @@ mod tests {
         assert_eq!(pe_ttm(100.0, &[1.0, 1.0, 1.0, 1.0, 5.0]), Some(25.0)); // uses newest 4
         assert_eq!(pe_ttm(100.0, &[1.0, 1.0]), None); // too few quarters
         assert_eq!(pe_ttm(100.0, &[-1.0, -1.0, 0.0, 0.0]), None); // non-positive TTM
+    }
+
+    #[test]
+    fn portfolio_backtest_parity_with_legacy() {
+        let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 110.0), bar("2020-01-03", 121.0)];
+        let legacy = run_backtest(&bars, &Strategy::BuyAndHold);
+        let new = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10000.0);
+        for (l, p) in legacy.curve.iter().zip(new.curve.iter()) {
+            assert!((l.equity - p.equity).abs() < 1e-9, "mismatch at {}", l.date);
+        }
+        assert!((legacy.metrics.total_return - new.metrics.total_return).abs() < 1e-9);
+    }
+
+    #[test]
+    fn portfolio_backtest_no_lookahead_sma() {
+        // SMA crossover via portfolio loop must match the scalar loop (which the
+        // sma_has_no_lookahead test already proves is signal-clean).
+        let bars: Vec<Bar> = (1..=10)
+            .map(|i| bar(&format!("2020-01-{:02}", i), (i * 10) as f64))
+            .collect();
+        let strategy = Strategy::SmaCrossover { fast: 2, slow: 4 };
+        let legacy = run_backtest(&bars, &strategy);
+        let new = run_portfolio_backtest("X", &bars, &strategy, 1000.0);
+        for (l, p) in legacy.curve.iter().zip(new.curve.iter()) {
+            assert!((l.equity - p.equity).abs() < 1e-9, "SMA mismatch at {}", l.date);
+        }
+    }
+
+    #[test]
+    fn portfolio_equity_and_unrealized_pnl() {
+        let mut p = Portfolio::new(1000.0);
+        let d: NaiveDate = "2024-01-01".parse().unwrap();
+        p.fill("AAPL", 10.0, 100.0, d);
+        assert!(p.cash.abs() < 1e-9);
+        let prices = HashMap::from([("AAPL".to_string(), 120.0)]);
+        assert!((p.equity(&prices) - 1200.0).abs() < 1e-9);
+        assert!((p.unrealized_pnl(&prices) - 200.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn portfolio_fifo_realized_pnl() {
+        let mut p = Portfolio::new(2000.0);
+        let (d1, d2, d3) = (
+            "2024-01-01".parse::<NaiveDate>().unwrap(),
+            "2024-02-01".parse::<NaiveDate>().unwrap(),
+            "2024-03-01".parse::<NaiveDate>().unwrap(),
+        );
+        p.fill("AAPL", 5.0, 100.0, d1); // lot 1: 5@100
+        p.fill("AAPL", 5.0, 110.0, d2); // lot 2: 5@110
+        // sell 7: close 5@100 (gain 150) + 2@110 (gain 40) = 190
+        p.fill("AAPL", -7.0, 130.0, d3);
+        assert!((p.realized_pnl - 190.0).abs() < 1e-9);
+        assert!((p.shares("AAPL") - 3.0).abs() < 1e-9); // 3 remain from lot 2
     }
 
     #[test]
