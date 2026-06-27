@@ -120,6 +120,34 @@ impl Portfolio {
                 .sum::<f64>()
     }
 
+    /// Rebalance to `alloc` target weights using total portfolio equity.
+    /// Tickers absent from `prices` or with zero price are skipped.
+    /// ponytail: ADV per ticker not tracked → market impact = 0; add a
+    /// ticker→adv map when impact needs to be modelled for multi-asset.
+    pub fn rebalance(
+        &mut self,
+        alloc: &Allocation,
+        prices: &HashMap<String, f64>,
+        date: NaiveDate,
+        costs: &FillCosts,
+    ) {
+        let equity = self.equity(prices);
+        for (ticker, &weight) in &alloc.0 {
+            let price = match prices.get(ticker.as_str()) {
+                Some(&p) if p > 0.0 => p,
+                _ => continue,
+            };
+            let delta = weight * equity / price - self.shares(ticker);
+            if delta.abs() > 1e-10 {
+                self.cash -= costs.total(delta, price, 0.0);
+                if delta < 0.0 {
+                    self.cash -= costs.transaction_tax * delta.abs() * price;
+                }
+                self.fill(ticker, delta, price, date);
+            }
+        }
+    }
+
     /// Resolve an order to a fill and apply it, deducting `costs` from cash.
     /// `adv` = average daily volume in shares (pass 0.0 when market_impact is 0).
     pub fn execute(&mut self, order: &Order, price: f64, date: NaiveDate, costs: &FillCosts, adv: f64) {
@@ -154,6 +182,23 @@ impl Portfolio {
                 lots.iter().map(|l| l.qty * (p - l.entry_price)).sum::<f64>()
             })
             .sum()
+    }
+}
+
+/// Multi-asset target allocation: ticker → weight fraction (should sum to ≤ 1.0).
+#[derive(Clone, Debug, Default)]
+pub struct Allocation(pub HashMap<String, f64>);
+
+impl Allocation {
+    /// Scale all weights so they sum to exactly 1.0.
+    pub fn normalize(mut self) -> Self {
+        let total: f64 = self.0.values().sum();
+        if total > 0.0 {
+            for w in self.0.values_mut() {
+                *w /= total;
+            }
+        }
+        self
     }
 }
 
@@ -723,6 +768,30 @@ mod tests {
         let costs = FillCosts { spread_fraction: 0.01, ..FillCosts::ZERO };
         let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs);
         assert!((r.curve.last().unwrap().equity - 0.99).abs() < 1e-9);
+    }
+
+    #[test]
+    fn allocation_normalize_and_rebalance() {
+        let d: NaiveDate = "2024-01-01".parse().unwrap();
+        let mut p = Portfolio::new(10_000.0);
+        let alloc = Allocation(HashMap::from([
+            ("AAPL".to_string(), 0.6),
+            ("MSFT".to_string(), 0.4),
+        ]));
+        let prices = HashMap::from([("AAPL".to_string(), 100.0), ("MSFT".to_string(), 200.0)]);
+        p.rebalance(&alloc, &prices, d, &FillCosts::ZERO);
+        assert!((p.shares("AAPL") - 60.0).abs() < 1e-9); // 6000 / 100
+        assert!((p.shares("MSFT") - 20.0).abs() < 1e-9); // 4000 / 200
+        assert!(p.cash.abs() < 1e-9);
+
+        // normalize: 3:1 → 75%:25%
+        let alloc2 = Allocation(HashMap::from([
+            ("X".to_string(), 3.0),
+            ("Y".to_string(), 1.0),
+        ]))
+        .normalize();
+        assert!((alloc2.0["X"] - 0.75).abs() < 1e-9);
+        assert!((alloc2.0["Y"] - 0.25).abs() < 1e-9);
     }
 
     #[test]
