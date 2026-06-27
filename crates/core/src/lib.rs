@@ -252,10 +252,22 @@ pub struct EquityPoint {
     pub equity: f64,
 }
 
+/// Per-position breakdown included in a portfolio-level backtest result.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PositionSummary {
+    pub ticker: String,
+    pub shares: f64,
+    pub realized_pnl: f64,
+    pub unrealized_pnl: f64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BacktestResult {
     pub curve: Vec<EquityPoint>,
     pub metrics: Metrics,
+    /// Per-position breakdown; empty for legacy `run_backtest` results.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub positions: Vec<PositionSummary>,
     /// Set when the run entered at a P/E-minimum: the chosen entry date and the
     /// P/E there. `None` for ordinary runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -294,6 +306,7 @@ pub fn run_backtest(bars: &[Bar], strategy: &Strategy) -> BacktestResult {
     BacktestResult {
         curve,
         metrics,
+        positions: vec![],
         entry_date: None,
         entry_pe: None,
         entry_index: None,
@@ -332,7 +345,22 @@ pub fn run_portfolio_backtest(
 
     let rets: Vec<f64> = curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect();
     let metrics = compute_metrics(&curve, &rets);
-    BacktestResult { curve, metrics, entry_date: None, entry_pe: None, entry_index: None, entry_count: None }
+
+    let final_close = bars.last().map(|b| b.close).unwrap_or(0.0);
+    let shares = portfolio.shares(ticker);
+    let unrealized = portfolio
+        .positions
+        .get(ticker)
+        .map(|lots| lots.iter().map(|l| l.qty * (final_close - l.entry_price)).sum())
+        .unwrap_or(0.0);
+    let positions = vec![PositionSummary {
+        ticker: ticker.to_owned(),
+        shares,
+        realized_pnl: portfolio.realized_pnl,
+        unrealized_pnl: unrealized,
+    }];
+
+    BacktestResult { curve, metrics, positions, entry_date: None, entry_pe: None, entry_index: None, entry_count: None }
 }
 
 /// Point-in-time trailing P/E for each bar: `close / TTM EPS`, where TTM EPS is
