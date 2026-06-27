@@ -126,6 +126,9 @@ impl Portfolio {
         match order {
             Order::Market { ticker, qty } => {
                 self.cash -= costs.total(*qty, price, adv);
+                if *qty < 0.0 {
+                    self.cash -= costs.transaction_tax * qty.abs() * price;
+                }
                 self.fill(ticker, *qty, price, date);
             }
             Order::TargetWeight { ticker, weight } => {
@@ -133,6 +136,9 @@ impl Portfolio {
                 let delta = weight * equity / price - self.shares(ticker);
                 if delta.abs() > 1e-10 {
                     self.cash -= costs.total(delta, price, adv);
+                    if delta < 0.0 {
+                        self.cash -= costs.transaction_tax * delta.abs() * price;
+                    }
                     self.fill(ticker, delta, price, date);
                 }
             }
@@ -163,10 +169,22 @@ pub struct FillCosts {
     ///   impact = σ × √(|qty| / adv) × price.
     /// 0.0 disables impact. Typical values: 0.1–1.0 depending on liquidity.
     pub market_impact: f64,
+    /// Fraction of sell proceeds deducted as transaction tax (e.g. 0.005 = 0.5% UK stamp duty).
+    /// ponytail: single rate; extend to HashMap<String, f64> for per-country rates.
+    pub transaction_tax: f64,
+    /// Daily borrow cost on short positions as fraction of notional (e.g. 0.0003 = 3 bp/day).
+    /// Zero-ops for long-only strategies; activates when H4/H5 adds short positions.
+    pub borrow_rate_daily: f64,
 }
 
 impl FillCosts {
-    pub const ZERO: Self = Self { commission: 0.0, spread_fraction: 0.0, market_impact: 0.0 };
+    pub const ZERO: Self = Self {
+        commission: 0.0,
+        spread_fraction: 0.0,
+        market_impact: 0.0,
+        transaction_tax: 0.0,
+        borrow_rate_daily: 0.0,
+    };
 
     /// Total cost for a fill. `adv` = average daily volume in shares; only
     /// used when `market_impact > 0`.
@@ -375,6 +393,12 @@ pub fn run_portfolio_backtest(
     let mut curve = Vec::with_capacity(bars.len());
 
     for (i, bar) in bars.iter().enumerate() {
+        // Daily short borrow cost on any open short position (zero-ops for long-only).
+        if costs.borrow_rate_daily > 0.0 {
+            let short_qty = (-portfolio.shares(ticker)).max(0.0);
+            portfolio.cash -= short_qty * bar.close * costs.borrow_rate_daily;
+        }
+
         // Mark-to-market BEFORE rebalance — today's equity reflects yesterday's position.
         let eq = portfolio.cash + portfolio.shares(ticker) * bar.close;
         curve.push(EquityPoint { date: bar.date, equity: eq / initial_cash });
@@ -645,7 +669,7 @@ mod tests {
     fn flat_commission_reduces_equity() {
         // Buy 10 shares @ 100 costs $10 commission → cash = -10, equity at bar 1 = 990/1000.
         let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 100.0)];
-        let costs = FillCosts { commission: 10.0, spread_fraction: 0.0, market_impact: 0.0 };
+        let costs = FillCosts { commission: 10.0, ..FillCosts::ZERO };
         let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs);
         assert!((r.curve.last().unwrap().equity - 0.99).abs() < 1e-9);
     }
@@ -654,9 +678,22 @@ mod tests {
     fn spread_fraction_reduces_equity() {
         // 1% spread on 10 shares @ 100 = $10 → same result as commission test.
         let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 100.0)];
-        let costs = FillCosts { commission: 0.0, spread_fraction: 0.01, market_impact: 0.0 };
+        let costs = FillCosts { spread_fraction: 0.01, ..FillCosts::ZERO };
         let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &costs);
         assert!((r.curve.last().unwrap().equity - 0.99).abs() < 1e-9);
+    }
+
+    #[test]
+    fn transaction_tax_deducted_on_sell() {
+        // Buy 10 @ 100, then sell at 100 with 1% tax → tax = 0.01 * 10 * 100 = 10.
+        // After sell: cash = 10*100 (proceeds) - 10 (tax) = 990 from zero-cash start.
+        let d: NaiveDate = "2024-01-01".parse().unwrap();
+        let costs = FillCosts { transaction_tax: 0.01, ..FillCosts::ZERO };
+        let mut p = Portfolio::new(1000.0);
+        p.execute(&Order::Market { ticker: "X".into(), qty: 10.0 }, 100.0, d, &costs, 0.0);
+        p.execute(&Order::Market { ticker: "X".into(), qty: -10.0 }, 100.0, d, &costs, 0.0);
+        // cash = 1000 - 1000 (buy) + 1000 (sell) - 10 (tax) = 990
+        assert!((p.cash - 990.0).abs() < 1e-9);
     }
 
     #[test]
@@ -665,7 +702,7 @@ mod tests {
         // Buying 25 shares costs 1.0 * sqrt(25/100) * price = 0.5 * price.
         // So large order (relative to ADV) costs more impact per share.
         let d: NaiveDate = "2024-01-01".parse().unwrap();
-        let costs = FillCosts { commission: 0.0, spread_fraction: 0.0, market_impact: 1.0 };
+        let costs = FillCosts { market_impact: 1.0, ..FillCosts::ZERO };
         // 100 shares @ price 1.0, ADV=100 → impact = 1.0 * sqrt(1.0) * 1.0 = 1.0
         let impact_large = costs.total(100.0, 1.0, 100.0);
         // 25 shares @ price 1.0, ADV=100 → impact = 1.0 * sqrt(0.25) * 1.0 = 0.5
