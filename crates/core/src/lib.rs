@@ -27,6 +27,11 @@ pub struct Fundamental {
     pub metric: String,
     pub period_type: String,
     pub value: f64,
+    /// SEC filing date for this fact — when the market could first see it.
+    /// `None` for facts from filings not covered by the submissions cache
+    /// (typically very old filings). Falls back to `period` (period end) when missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filed_date: Option<NaiveDate>,
 }
 
 /// Trailing-twelve-month price/earnings from the latest close and the four most

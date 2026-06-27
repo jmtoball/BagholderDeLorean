@@ -50,12 +50,14 @@ fn default_strategy() -> String {
     "buy_and_hold".into()
 }
 
-/// Pull quarterly EPS out of a fundamentals set as `(period, value)`.
+/// Pull quarterly EPS as `(known_from_date, value)`.
+/// Uses the SEC filing date when available (point-in-time); falls back to
+/// period end for facts from older filings not in the submissions cache.
 fn quarterly_eps(funds: &[Fundamental]) -> Vec<(chrono::NaiveDate, f64)> {
     funds
         .iter()
         .filter(|f| f.metric == "eps_basic" && f.period_type == "Q")
-        .map(|f| (f.period, f.value))
+        .map(|f| (f.filed_date.unwrap_or(f.period), f.value))
         .collect()
 }
 

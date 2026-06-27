@@ -63,6 +63,10 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
+        // Migration: add filed_date to databases created before C1 landed.
+        let _ = conn.execute_batch(
+            "ALTER TABLE fundamentals ADD COLUMN IF NOT EXISTS filed_date DATE",
+        );
         Ok(Self { conn })
     }
 
@@ -135,7 +139,7 @@ impl Store {
 
     fn read_fundamentals(&self, ticker: &str) -> Result<Vec<Fundamental>> {
         let mut stmt = self.conn.prepare(
-            "SELECT period, metric, period_type, value FROM fundamentals \
+            "SELECT period, metric, period_type, value, filed_date FROM fundamentals \
              WHERE ticker = ? ORDER BY period, metric, period_type",
         )?;
         let funds = stmt
@@ -145,6 +149,7 @@ impl Store {
                     metric: r.get(1)?,
                     period_type: r.get(2)?,
                     value: r.get(3)?,
+                    filed_date: r.get(4)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -158,11 +163,13 @@ impl Store {
         {
             // OR REPLACE: a period+metric+type can appear under several XBRL
             // tags or amended filings; last write wins.
-            let mut stmt = self
-                .conn
-                .prepare("INSERT OR REPLACE INTO fundamentals VALUES (?, ?, ?, ?, ?)")?;
+            let mut stmt = self.conn.prepare(
+                "INSERT OR REPLACE INTO fundamentals VALUES (?, ?, ?, ?, ?, ?)",
+            )?;
             for f in funds {
-                stmt.execute(params![ticker, f.period, f.metric, f.period_type, f.value])?;
+                stmt.execute(params![
+                    ticker, f.period, f.metric, f.period_type, f.value, f.filed_date
+                ])?;
             }
         }
         self.conn.execute_batch("COMMIT")?;
@@ -278,6 +285,7 @@ mod tests {
             metric: metric.into(),
             period_type: pt.into(),
             value,
+            filed_date: None,
         };
         s.write_fundamentals(
             "AAPL.US",

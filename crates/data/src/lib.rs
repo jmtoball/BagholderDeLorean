@@ -214,11 +214,47 @@ fn parse_cik_map(body: &str) -> Result<Vec<(String, i64)>> {
 /// All curated fundamentals for a company, by SEC CIK. Prefer
 /// `Store::fundamentals`, which resolves the CIK and caches.
 pub fn download_fundamentals(cik: i64) -> Result<Vec<Fundamental>> {
+    // Fetch filing dates from submissions first; facts reference them by accn.
+    let filing_dates = download_submissions_dates(cik)?;
     let url = format!("https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010}.json");
-    parse_company_facts(&sec_get(&url)?)
+    parse_company_facts(&sec_get(&url)?, &filing_dates)
 }
 
-fn parse_company_facts(body: &str) -> Result<Vec<Fundamental>> {
+/// Accession-number → filing date from SEC submissions (recent filings only).
+/// ponytail: fetches only `filings.recent` — typically covers ~5-10 years.
+/// Facts from older filings get `filed_date: None` and fall back to period end.
+pub(crate) fn download_submissions_dates(cik: i64) -> Result<HashMap<String, NaiveDate>> {
+    #[derive(Deserialize)]
+    struct Subs {
+        filings: Filings,
+    }
+    #[derive(Deserialize)]
+    struct Filings {
+        recent: Recent,
+    }
+    #[derive(Deserialize)]
+    struct Recent {
+        #[serde(rename = "accessionNumber")]
+        accession_number: Vec<String>,
+        #[serde(rename = "filingDate")]
+        filing_date: Vec<String>,
+    }
+
+    let url = format!("https://data.sec.gov/submissions/CIK{cik:010}.json");
+    let body = sec_get(&url)?;
+    let subs: Subs = serde_json::from_str(&body).context("parsing submissions JSON")?;
+    let r = subs.filings.recent;
+    Ok(r.accession_number
+        .into_iter()
+        .zip(r.filing_date)
+        .filter_map(|(accn, date_str)| date_str.parse::<NaiveDate>().ok().map(|d| (accn, d)))
+        .collect())
+}
+
+fn parse_company_facts(
+    body: &str,
+    filing_dates: &HashMap<String, NaiveDate>,
+) -> Result<Vec<Fundamental>> {
     #[derive(Deserialize)]
     struct Facts {
         #[serde(rename = "us-gaap", default)]
@@ -239,6 +275,8 @@ fn parse_company_facts(body: &str) -> Result<Vec<Fundamental>> {
         val: f64,
         #[serde(default)]
         form: String,
+        #[serde(default)]
+        accn: String,
     }
 
     let facts: CompanyFacts = serde_json::from_str(body).context("parsing companyfacts JSON")?;
@@ -250,18 +288,15 @@ fn parse_company_facts(body: &str) -> Result<Vec<Fundamental>> {
             };
             for points in concept.units.values() {
                 for p in points {
-                    // Only periodic filings; skip 8-Ks and the like.
                     if !matches!(p.form.as_str(), "10-K" | "10-Q") {
                         continue;
                     }
-                    // Classify by duration. Income facts carry a start date, so
-                    // we can keep the clean ~quarter and ~year figures and drop
-                    // the year-to-date cumulatives that share an end date.
                     let Some(period_type) = classify_period(p.start, p.end, &p.form) else {
                         continue;
                     };
                     out.push(Fundamental {
                         period: p.end,
+                        filed_date: filing_dates.get(&p.accn).copied(),
                         metric: name.to_string(),
                         period_type: period_type.to_string(),
                         value: p.val,
@@ -340,21 +375,52 @@ mod tests {
         let json = r#"{
           "facts": { "us-gaap": {
             "NetIncomeLoss": { "units": { "USD": [
-              {"start":"2022-01-01","end":"2022-12-31","val":1000,"form":"10-K"},
-              {"start":"2022-07-01","end":"2022-09-30","val":250,"form":"10-Q"},
-              {"start":"2022-01-01","end":"2022-06-30","val":600,"form":"10-Q"},
-              {"start":"2022-04-01","end":"2022-06-30","val":99,"form":"8-K"}
+              {"start":"2022-01-01","end":"2022-12-31","val":1000,"form":"10-K","accn":"0000001-22-000001"},
+              {"start":"2022-07-01","end":"2022-09-30","val":250,"form":"10-Q","accn":"0000001-22-000002"},
+              {"start":"2022-01-01","end":"2022-06-30","val":600,"form":"10-Q","accn":"0000001-22-000003"},
+              {"start":"2022-04-01","end":"2022-06-30","val":99,"form":"8-K","accn":"0000001-22-000004"}
             ]}},
             "SomeUnusedTag": { "units": { "USD": [
-              {"start":"2022-01-01","end":"2022-12-31","val":42,"form":"10-K"}
+              {"start":"2022-01-01","end":"2022-12-31","val":42,"form":"10-K","accn":"0000001-22-000001"}
             ]}}
           }}
         }"#;
-        let funds = parse_company_facts(json).unwrap();
+        // Without filing dates: filed_date should be None.
+        let funds = parse_company_facts(json, &HashMap::new()).unwrap();
         // 8-K dropped, YTD (6mo) dropped, unlisted tag ignored -> FY + one quarter
         assert_eq!(funds.len(), 2);
         assert!(funds.iter().all(|f| f.metric == "net_income"));
         assert!(funds.iter().any(|f| f.value == 1000.0 && f.period_type == "FY"));
         assert!(funds.iter().any(|f| f.value == 250.0 && f.period_type == "Q"));
+        assert!(funds.iter().all(|f| f.filed_date.is_none()));
+    }
+
+    #[test]
+    fn parse_company_facts_resolves_filing_date() {
+        let json = r#"{
+          "facts": { "us-gaap": {
+            "EarningsPerShareBasic": { "units": { "USD/shares": [
+              {"start":"2022-07-01","end":"2022-09-30","val":1.29,"form":"10-Q","accn":"0000320193-22-000108"}
+            ]}}
+          }}
+        }"#;
+        let mut dates = HashMap::new();
+        dates.insert(
+            "0000320193-22-000108".to_string(),
+            "2022-10-28".parse::<NaiveDate>().unwrap(),
+        );
+        let funds = parse_company_facts(json, &dates).unwrap();
+        assert_eq!(funds.len(), 1);
+        assert_eq!(funds[0].filed_date, Some("2022-10-28".parse::<NaiveDate>().unwrap()));
+        assert_eq!(funds[0].period, "2022-09-30".parse::<NaiveDate>().unwrap());
+    }
+
+    #[test]
+    fn parse_fred_csv_skips_missing() {
+        let csv = "DATE,T10Y2Y\n2023-01-01,1.23\n2023-01-02,.\n2023-01-03,0.95\n";
+        let rows = parse_fred_csv(csv).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!((rows[0].1 - 1.23).abs() < 1e-9);
+        assert!((rows[1].1 - 0.95).abs() < 1e-9);
     }
 }
