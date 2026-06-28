@@ -1207,6 +1207,17 @@ impl TaxConfig {
     pub fn de_flat_rate(&self) -> f64 {
         if self.church_tax { DE_CHURCH_RATE } else { DE_BASE_RATE }
     }
+
+    /// Marginal tax rate on a dividend. US: `qualified` (held > 60 days in the
+    /// window) → the long-term rate; otherwise the ordinary rate (NIIT stacks on
+    /// both). DE: the flat rate, same as gains. `None` → 0.
+    pub fn dividend_tax_rate(&self, qualified: bool) -> f64 {
+        match self.system {
+            TaxSystem::None => 0.0,
+            TaxSystem::UsFederal => self.gains_tax_rate(if qualified { 400 } else { 0 }),
+            TaxSystem::Germany => self.de_flat_rate(),
+        }
+    }
 }
 
 /// German fund taxation for the traded ticker (InvStG 2018). `None` = a direct
@@ -1294,8 +1305,12 @@ fn settle_de_fund(
     cum_vap += vap;
     let vap_base = vap * (1.0 - tfs);
 
+    // Distributions are taxed as income too (TFS applies); they also netted the
+    // Vorabpauschale down above. All share the one annual allowance.
+    let dist_base = distributions * (1.0 - tfs);
+
     let allow = cfg.annual_allowance;
-    let taxable = (sale_base + vap_base - allow).max(0.0);
+    let taxable = (sale_base + vap_base + dist_base - allow).max(0.0);
     (taxable * rate, new_carry, cum_vap)
 }
 
@@ -1358,15 +1373,19 @@ impl BacktestResult {
     }
 }
 
-/// Settle one calendar year's realized capital-gains tax. `st_net`/`lt_net` are
-/// the year's signed short-/long-term gains (net of same-character losses);
-/// `loss_carry` is the prior carried-forward loss (≤ 0). Returns the tax owed and
-/// the new carryforward. Losses (this year's + carried) offset short-term gains
-/// first (higher US rate), then long-term; the DE allowance then reduces the
-/// taxable base (long-term first). For `TaxSystem::None` it's a no-op.
-/// ponytail: single stock pool per the spec — ST/LT losses cross-offset, which is
-/// the documented simplification of the full IRS net-within-then-across rule.
-fn settle_year(cfg: &TaxConfig, st_net: f64, lt_net: f64, loss_carry: f64) -> (f64, f64) {
+/// Settle one calendar year's realized capital-gains + dividend tax for a direct
+/// holding (non-fund). `st_net`/`lt_net` are the year's signed short-/long-term
+/// gains (net of same-character losses); `loss_carry` is the prior carryforward
+/// (≤ 0); `div_qualified`/`div_ordinary` are the year's dividend income split by
+/// US qualification (DE ignores the split). Returns `(tax, new_carryforward)`.
+/// Losses (this year's + carried) offset short-term gains first (higher US rate),
+/// then long-term; remainder carries. `TaxSystem::None` is a no-op.
+/// ponytail: single stock pool per the spec — ST/LT losses cross-offset, the
+/// documented simplification of the full IRS net-within-then-across rule.
+fn settle_year(
+    cfg: &TaxConfig, st_net: f64, lt_net: f64, loss_carry: f64,
+    div_qualified: f64, div_ordinary: f64,
+) -> (f64, f64) {
     if cfg.system == TaxSystem::None {
         return (0.0, 0.0);
     }
@@ -1385,14 +1404,21 @@ fn settle_year(cfg: &TaxConfig, st_net: f64, lt_net: f64, loss_carry: f64) -> (f
     let losses_left = (losses_left - gains_lt).max(0.0);
     let new_carry = -losses_left;
 
-    // Annual allowance (DE Sparerpauschbetrag; US = 0). Apply to the lower-rate
-    // long-term base first so it shelters the dearer slice last.
-    let allow = cfg.annual_allowance;
-    let lt_after = (lt_taxable - allow).max(0.0);
-    let allow_left = (allow - lt_taxable).max(0.0);
-    let st_after = (st_taxable - allow_left).max(0.0);
-
-    (st_after * st_rate + lt_after * lt_rate, new_carry)
+    let tax = match cfg.system {
+        TaxSystem::UsFederal => {
+            // No allowance; qualified dividends take the long-term rate.
+            st_taxable * st_rate + lt_taxable * lt_rate
+                + div_qualified * lt_rate + div_ordinary * st_rate
+        }
+        TaxSystem::Germany => {
+            // Single flat rate; the Sparerpauschbetrag shelters gains + dividends.
+            let rate = cfg.de_flat_rate();
+            let base = st_taxable + lt_taxable + div_qualified + div_ordinary;
+            (base - cfg.annual_allowance).max(0.0) * rate
+        }
+        TaxSystem::None => 0.0,
+    };
+    (tax, new_carry)
 }
 
 /// Event-driven single-asset backtest using the portfolio state model.
@@ -1452,6 +1478,10 @@ pub fn run_portfolio_backtest_taxed(
     let mut year_lt = 0.0; // signed long-term realized gains this year
     let mut loss_carry = 0.0; // carried-forward capital loss (≤ 0)
     let mut total_tax = 0.0;
+    // Dividend income accrued this year (US splits qualified/ordinary; DE routes
+    // to year_distributions below). Taxed at year-end, never credited to cash.
+    let mut year_div_qualified = 0.0;
+    let mut year_div_ordinary = 0.0;
 
     // German fund (InvStG 2018): Teilfreistellung on gains + Vorabpauschale. When
     // `de_fund`, realized gains route to `year_fund_gain` and settle via the fund
@@ -1496,15 +1526,24 @@ pub fn run_portfolio_backtest_taxed(
                     loss_carry = carry;
                     cum_vap = cv;
                     year_fund_gain = 0.0;
-                    year_distributions = 0.0;
                     t
                 } else {
-                    let (t, carry) = settle_year(tax, year_st, year_lt, loss_carry);
+                    // DE direct stocks have no qualified/ordinary split — fold the
+                    // year's distributions into the qualified slot (rates are equal).
+                    let (dq, do_) = if tax.system == TaxSystem::Germany {
+                        (year_distributions, 0.0)
+                    } else {
+                        (year_div_qualified, year_div_ordinary)
+                    };
+                    let (t, carry) = settle_year(tax, year_st, year_lt, loss_carry, dq, do_);
                     loss_carry = carry;
                     year_st = 0.0;
                     year_lt = 0.0;
                     t
                 };
+                year_div_qualified = 0.0;
+                year_div_ordinary = 0.0;
+                year_distributions = 0.0;
                 portfolio.cash -= t;
                 total_tax += t;
             }
@@ -1514,7 +1553,37 @@ pub fn run_portfolio_backtest_taxed(
         // Apply any corporate actions on this bar's date before mark-to-market so
         // lot quantities and prices stay consistent with the adjusted close series.
         for ca in corporate_actions.iter().filter(|a| a.ex_date == bar.date && a.ticker == ticker) {
-            portfolio.apply_action(ticker, &ca.kind);
+            match &ca.kind {
+                CaKind::Split { .. } => portfolio.apply_action(ticker, &ca.kind),
+                CaKind::Dividend { amount_per_share } => {
+                    // Taxed as income, NOT credited to cash: close is adjclose, which
+                    // already reinvested the dividend — crediting it would double-count.
+                    // ponytail: reinvestment is gross (the withheld tax leaves at year
+                    // end), a small over-reinvestment vs a true raw-price model.
+                    let income = portfolio.shares(ticker).max(0.0) * amount_per_share;
+                    if income > 0.0 {
+                        match tax.system {
+                            TaxSystem::Germany => year_distributions += income,
+                            TaxSystem::UsFederal => {
+                                // Qualified for shares held > 60 days as of the ex-date.
+                                // ponytail: approximates the 121-day window (ignores the
+                                // sell-within-60-days-after disqualifier).
+                                let (held, total) = portfolio.positions.get(ticker).map(|lots| {
+                                    let total: f64 = lots.iter().filter(|l| l.qty > 0.0).map(|l| l.qty).sum();
+                                    let held: f64 = lots.iter()
+                                        .filter(|l| l.qty > 0.0 && (bar.date - l.entry_date).num_days() > 60)
+                                        .map(|l| l.qty).sum();
+                                    (held, total)
+                                }).unwrap_or((0.0, 0.0));
+                                let q_frac = if total > 0.0 { held / total } else { 0.0 };
+                                year_div_qualified += income * q_frac;
+                                year_div_ordinary += income * (1.0 - q_frac);
+                            }
+                            TaxSystem::None => {}
+                        }
+                    }
+                }
+            }
         }
 
         // Mark-to-market BEFORE rebalance — today's equity reflects yesterday's position.
@@ -1592,7 +1661,12 @@ pub fn run_portfolio_backtest_taxed(
         settle_de_fund(tax, tfs, year_fund_gain, year_open_value, value_gain,
             year_distributions, bz, pror, loss_carry, cum_vap).0
     } else {
-        settle_year(tax, year_st, year_lt, loss_carry).0
+        let (dq, do_) = if tax.system == TaxSystem::Germany {
+            (year_distributions, 0.0)
+        } else {
+            (year_div_qualified, year_div_ordinary)
+        };
+        settle_year(tax, year_st, year_lt, loss_carry, dq, do_).0
     };
     if final_tax != 0.0 {
         portfolio.cash -= final_tax;
@@ -1895,7 +1969,7 @@ mod tests {
         let mut cfg = TaxConfig::preset(TaxSystem::UsFederal);
         cfg.taxable_income = 96_000.0; // long-term 15%, ordinary 22%, no NIIT
         // $1,000 short-term gain + $1,000 long-term gain in one year, no losses.
-        let (tax, carry) = settle_year(&cfg, 1_000.0, 1_000.0, 0.0);
+        let (tax, carry) = settle_year(&cfg, 1_000.0, 1_000.0, 0.0, 0.0, 0.0);
         assert!((tax - (1_000.0 * 0.22 + 1_000.0 * 0.15)).abs() < 1e-6);
         assert_eq!(carry, 0.0);
     }
@@ -1904,7 +1978,7 @@ mod tests {
     fn de_settles_flat_after_allowance() {
         let cfg = TaxConfig::preset(TaxSystem::Germany); // €1,000 allowance, 26.375%
         // €5,000 long-term gain, less the €1,000 Sparerpauschbetrag → €4,000 taxed.
-        let (tax, _) = settle_year(&cfg, 0.0, 5_000.0, 0.0);
+        let (tax, _) = settle_year(&cfg, 0.0, 5_000.0, 0.0, 0.0, 0.0);
         assert!((tax - 4_000.0 * 0.26375).abs() < 1e-6);
     }
 
@@ -1913,11 +1987,11 @@ mod tests {
         let mut cfg = TaxConfig::preset(TaxSystem::UsFederal);
         cfg.taxable_income = 96_000.0;
         // Year 1: net $500 loss → no tax, carry -500 forward.
-        let (tax1, carry1) = settle_year(&cfg, 0.0, -500.0, 0.0);
+        let (tax1, carry1) = settle_year(&cfg, 0.0, -500.0, 0.0, 0.0, 0.0);
         assert_eq!(tax1, 0.0);
         assert!((carry1 + 500.0).abs() < 1e-9);
         // Year 2: $1,000 long-term gain offset by the $500 carry → $500 at 15%.
-        let (tax2, carry2) = settle_year(&cfg, 0.0, 1_000.0, carry1);
+        let (tax2, carry2) = settle_year(&cfg, 0.0, 1_000.0, carry1, 0.0, 0.0);
         assert!((tax2 - 500.0 * 0.15).abs() < 1e-6);
         assert_eq!(carry2, 0.0);
     }
@@ -2066,6 +2140,57 @@ mod tests {
             "ETF", &bars, &Strategy::BuyAndHold, 100_000.0, &FillCosts::ZERO, 0.0, &[], &de, Some(&fund),
         );
         assert_eq!(no_vap.total_tax, 0.0);
+    }
+
+    // --- F3: dividend taxation ----------------------------------------------
+
+    #[test]
+    fn dividend_rate_resolver() {
+        let mut us = TaxConfig::preset(TaxSystem::UsFederal);
+        us.taxable_income = 96_000.0;
+        assert!((us.dividend_tax_rate(true) - 0.15).abs() < 1e-9);  // qualified → LT
+        assert!((us.dividend_tax_rate(false) - 0.22).abs() < 1e-9); // ordinary
+        let de = TaxConfig::preset(TaxSystem::Germany);
+        assert!((de.dividend_tax_rate(true) - 0.26375).abs() < 1e-9);
+        assert!((de.dividend_tax_rate(false) - 0.26375).abs() < 1e-9);
+        assert_eq!(TaxConfig::preset(TaxSystem::None).dividend_tax_rate(true), 0.0);
+    }
+
+    #[test]
+    fn us_settles_dividends_qualified_vs_ordinary() {
+        let mut cfg = TaxConfig::preset(TaxSystem::UsFederal);
+        cfg.taxable_income = 96_000.0;
+        let (tax, _) = settle_year(&cfg, 0.0, 0.0, 0.0, 1_000.0, 500.0);
+        assert!((tax - (1_000.0 * 0.15 + 500.0 * 0.22)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn de_settles_dividends_flat_after_allowance() {
+        let cfg = TaxConfig::preset(TaxSystem::Germany);
+        // €2,000 dividends less the €1,000 allowance → €1,000 taxed flat.
+        let (tax, _) = settle_year(&cfg, 0.0, 0.0, 0.0, 2_000.0, 0.0);
+        assert!((tax - 1_000.0 * 0.26375).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dividends_taxed_but_not_credited_to_cash() {
+        let bars = rising_2024_bars();
+        let div = vec![CorporateAction {
+            ex_date: "2024-06-15".parse().unwrap(),
+            ticker: "X".into(),
+            kind: CaKind::Dividend { amount_per_share: 5.0 },
+        }];
+        // Pre-tax: the dividend must NOT inflate equity (adjclose already has it).
+        let with_div = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &div);
+        let without = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &[]);
+        for (a, b) in with_div.curve.iter().zip(without.curve.iter()) {
+            assert_eq!(a.equity, b.equity, "dividend credited to cash → double count");
+        }
+        // Under US tax it is taxed as income (held > 60d by June → qualified).
+        let mut us = TaxConfig::preset(TaxSystem::UsFederal);
+        us.taxable_income = 96_000.0;
+        let taxed = run_portfolio_backtest_taxed("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &div, &us, None);
+        assert!(taxed.total_tax > 0.0, "dividend should be taxed");
     }
 
     // A rise through 2020 then a 2021 crash, so an SMA crossover enters long and
