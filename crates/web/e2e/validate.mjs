@@ -75,12 +75,16 @@ async function step(label, fn) {
 
 await step('App loads', async () => {
   await page.goto(BASE, { waitUntil: 'networkidle' });
+  // Hero h1 reads "Backtest before you baghold." — wait on it to confirm WASM mounted.
   await page.waitForFunction(
-    () => document.querySelector('h1')?.textContent?.includes('Bagholder'),
+    () => /baghold/i.test(document.querySelector('h1')?.textContent ?? ''),
     undefined,
     { timeout: 15000 },
   );
-  ok(`WASM mounted — h1: "${await page.locator('h1').textContent()}"`);
+  ok(`WASM mounted — h1: "${await page.locator('h1').first().textContent()}"`);
+
+  // Backtest section + config must scroll into view (hero is full-height above it).
+  await page.locator('#app').scrollIntoViewIfNeeded();
 
   const text = await page.locator('body').innerText();
   if (!text.includes('STOCK SELECTION')) fail('concern panel 01 missing');
@@ -219,8 +223,9 @@ await step('Screen: Low P/E candidates table', async () => {
 // ─── 12. Select candidates + overlay backtest ─────────────────────────────────
 
 await step('Overlay backtest of 3 selected candidates', async () => {
+  // BdCheckbox hides the real <input> (opacity:0) behind the brand box — force the check.
   const boxes = page.locator('table tbody input[type="checkbox"]');
-  for (let i = 0; i < 3; i++) await boxes.nth(i).check();
+  for (let i = 0; i < 3; i++) await boxes.nth(i).check({ force: true });
   const checked = await page.locator('table tbody input:checked').count();
   if (checked !== 3) fail(`expected 3 checked, got ${checked}`);
   else ok('3 candidates selected');

@@ -6,12 +6,12 @@ pub mod components;
 
 use std::collections::{HashMap, HashSet};
 
-use bagholder_core::{BacktestResult, Candidate, PeHistory};
+use bagholder_core::{BacktestResult, Candidate, PeHistory, TradeEvent};
 use chrono::{Datelike, NaiveDate};
 use leptos::*;
 use serde::de::DeserializeOwned;
 
-use components::{BdBadge, BdButton, BdCallout, BdCard, BdInput, BdSelect, BdStat, BdSwitch, BdTabs, TabItem};
+use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSelect, BdStat, BdSwitch, BdTabs, TabItem};
 
 // ─── Chart geometry ───────────────────────────────────────────────────────────
 const W: f64   = 720.0;
@@ -25,7 +25,7 @@ const OVERLAY_COLORS: &[&str] = &[
 // ─── Strategy / screen data ───────────────────────────────────────────────────
 
 fn is_preset(id: &str) -> bool {
-    matches!(id, "pairs" | "riskparity" | "sectorrot" | "cycle" | "cramer" | "congress")
+    matches!(id, "pairs" | "riskparity" | "sectorrot" | "cycle")
 }
 fn action_label(id: &str) -> &'static str {
     match id {
@@ -38,9 +38,10 @@ fn action_label(id: &str) -> &'static str {
         "riskparity" => "Risk Parity",
         "sectorrot"  => "Momentum Sector Rotation",
         "cycle"      => "Economic-Cycle Rotation",
-        "cramer"     => "Inverse Cramer",
-        "congress"   => "Congressional Copy-Trade",
-        _            => "",
+        "cramer"         => "Inverse Cramer",
+        "congress"       => "Congressional Copy-Trade",
+        "short_squeeze"  => "Short Squeeze",
+        _                => "",
     }
 }
 fn action_rationale(id: &str) -> &'static str {
@@ -54,9 +55,10 @@ fn action_rationale(id: &str) -> &'static str {
         "riskparity" => "A self-contained multi-asset mix weighted by inverse volatility. Boring on purpose.",
         "sectorrot"  => "Rotate into the top-N sectors by trailing return. Selection and action move together.",
         "cycle"      => "Tilt toward the sectors that tend to lead each phase of the macro cycle.",
-        "cramer"     => "Selection is Cramer's picks; the action is to fade them. Inseparable, by design.",
-        "congress"   => "Mirror disclosed politician trades. Naively spectacular — until you wait for the filing date.",
-        _            => "",
+        "cramer"        => "Selection is Cramer's picks; the action is to fade them. Inseparable, by design.",
+        "congress"      => "Mirror disclosed politician trades. Naively spectacular — until you wait for the filing date.",
+        "short_squeeze" => "Enter when short interest is high and price is rising. Exit when momentum fades.",
+        _               => "",
     }
 }
 fn action_to_strategy(id: &str) -> &'static str {
@@ -67,7 +69,7 @@ fn action_to_strategy(id: &str) -> &'static str {
         _                => "buy_and_hold",
     }
 }
-fn is_meme(id: &str) -> bool { matches!(id, "cramer" | "congress") }
+fn is_meme(id: &str) -> bool { matches!(id, "cramer" | "congress" | "short_squeeze") }
 fn timeframe_years(tf: &str) -> u32 {
     match tf { "1y" => 1, "3y" => 3, "5y" => 5, "10y" => 10, _ => 0 }
 }
@@ -77,6 +79,15 @@ fn timeframe_years(tf: &str) -> u32 {
 fn fmt_pct(x: f64) -> String {
     let v = x * 100.0;
     format!("{}{:.1}%", if v >= 0.0 { "+" } else { "\u{2212}" }, v.abs())
+}
+fn fmt_money(x: f64) -> String {
+    if x.abs() >= 1_000_000.0 {
+        format!("${:.2}M", x / 1_000_000.0)
+    } else if x.abs() >= 1_000.0 {
+        format!("${:.0}", x)
+    } else {
+        format!("${:.2}", x)
+    }
 }
 
 // ─── API ──────────────────────────────────────────────────────────────────────
@@ -116,9 +127,74 @@ fn to_pts(result: &BacktestResult) -> Option<Vec<(f64, f64)>> {
 }
 
 /// SVG equity curve with area gradient fill for a single result.
+fn trade_timeline(trades: &[TradeEvent], dense: bool) -> View {
+    if trades.is_empty() {
+        return view! {
+            <div style="text-align:center;padding:32px 16px;color:var(--text-muted);font-size:var(--text-sm);font-family:var(--font-mono);">
+                "No trades executed. Bold of you."
+            </div>
+        }.into_view();
+    }
+    let row_gap = if dense { "var(--space-3)" } else { "var(--space-5)" };
+    let marker = if dense { 30u32 } else { 36u32 };
+    let marker_s = marker.to_string();
+    let rows: Vec<_> = trades.iter().enumerate().map(|(i, t)| {
+        let is_buy   = t.action == "buy";
+        let is_first = i == 0;
+        let is_last  = i == trades.len() - 1;
+        let tone_color = if is_buy { "var(--gain)" } else { "var(--loss)" };
+        let tone_soft  = if is_buy { "var(--gain-200)" } else { "var(--loss-200)" };
+        let arrow      = if is_buy { "↑" } else { "↓" };
+        let badge_label= if is_buy { "Buy" } else { "Sell" };
+        let date_str   = format!("{}", t.date.format("%b %-d, %Y"));
+        let price_str  = format!("${:.2}", t.price);
+        let shares_str = format!("{:.1} sh", t.shares);
+        let total_str  = format!("${:.2}", t.price * t.shares);
+        let spine_top  = if is_first { format!("{}px", marker / 2) } else { "0".to_string() };
+        let spine_bot  = if is_last  { format!("{}px", marker / 2) } else { "0".to_string() };
+        let font_size  = if dense { "var(--text-sm)" } else { "var(--text-base)" };
+        let row_pb     = if is_last { "0".to_string() } else { row_gap.to_string() };
+        let marker_ss  = marker_s.clone();
+        let col_style  = format!("position:relative;width:{marker_ss}px;flex:0 0 {marker_ss}px;display:flex;justify-content:center;");
+        let spine_style= format!("position:absolute;top:{spine_top};bottom:{spine_bot};left:50%;width:2px;margin-left:-1px;background:var(--border-soft);");
+        let dot_style  = format!("position:relative;z-index:1;width:{marker_ss}px;height:{marker_ss}px;flex:0 0 auto;border-radius:var(--radius-full);background:{tone_soft};border:var(--border-line) solid var(--ink-900);box-shadow:var(--shadow-hard-sm);display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-weight:var(--weight-bold);font-size:17px;color:var(--ink-900);");
+        let body_style = format!("flex:1;min-width:0;padding-bottom:{row_pb};padding-top:4px;");
+        let tick_style = format!("font-family:var(--font-mono);font-weight:var(--weight-bold);font-size:{font_size};letter-spacing:0.01em;color:var(--text-strong);");
+        let pill_style = format!("display:inline-flex;align-items:center;line-height:1;font-family:var(--font-body);font-weight:var(--weight-bold);font-size:var(--text-micro);letter-spacing:var(--tracking-overline);text-transform:uppercase;color:var(--paper-50);background:{tone_color};border:var(--border-hair) solid var(--ink-900);border-radius:var(--radius-full);padding:3px 8px;");
+        view! {
+            <li style="display:flex;align-items:stretch;gap:var(--space-3);">
+                <div style=col_style>
+                    <span style=spine_style />
+                    <span style=dot_style>{arrow}</span>
+                </div>
+                <div style=body_style>
+                    <div style="display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap;">
+                        <span style=tick_style>{t.ticker.clone()}</span>
+                        <span style=pill_style>{badge_label}</span>
+                        <span style="flex:1;" />
+                        <span style="font-family:var(--font-mono);font-size:var(--text-xs);color:var(--text-muted);">{date_str}</span>
+                    </div>
+                    <div style="display:flex;align-items:baseline;gap:var(--space-2);flex-wrap:wrap;margin-top:4px;">
+                        <span style="font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-body);">{price_str}</span>
+                        <span style="font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-muted);">{"× "}{shares_str}</span>
+                        <span style="flex:1;" />
+                        <span style="font-family:var(--font-mono);font-weight:var(--weight-bold);font-size:var(--text-sm);color:var(--text-strong);">{total_str}</span>
+                    </div>
+                </div>
+            </li>
+        }
+    }).collect();
+
+    view! {
+        <ol style="list-style:none;margin:0;padding:0;">
+            {rows}
+        </ol>
+    }.into_view()
+}
+
 fn equity_single(r: &BacktestResult, label: &str) -> View {
     let Some(pts) = to_pts(r) else {
-        return view! { <p style="color:var(--text-on-ink-muted);">"Not enough data."</p> }.into_view();
+        return view! { <p style="color:var(--text-on-ink-muted);">"Not enough history to chart this one."</p> }.into_view();
     };
     let line = svg_path(&pts);
     let (fx, _) = pts[0];
@@ -132,7 +208,9 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     let total_ret_s  = total_ret.clone(); // for BdStat (badge below owns original)
     let badge_tone   = if win { "gain" } else { "loss" };
     let card_title   = if win { "You'd have made money" } else { "You'd have lost money" }.to_string();
-    let card_ol      = format!("{label} · starts at $10,000");
+    let init_str     = fmt_money(r.initial_amount);
+    let card_ol      = format!("{label} · starts at {init_str}");
+    let final_str    = fmt_money(r.final_value);
     let cagr_str     = format!("{} /yr", fmt_pct(r.metrics.cagr));
     let mdd_str      = fmt_pct(r.metrics.max_drawdown);
     let sharpe_str   = format!("{:.2}", r.metrics.sharpe);
@@ -149,9 +227,52 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     let hs   = format!("{H}");
     let sw   = format!("width:16px;height:3px;background:{color};border-radius:2px;");
 
+    let bench_view = r.benchmark.as_ref().map(|b| {
+        let b_cagr   = format!("{} /yr", fmt_pct(b.metrics.cagr));
+        let b_mdd    = fmt_pct(b.metrics.max_drawdown);
+        let b_sharpe = format!("{:.2}", b.metrics.sharpe);
+        let b_ret    = fmt_pct(b.metrics.total_return);
+        let b_final  = fmt_money(b.final_value);
+        let b_tone   = if b.metrics.total_return >= 0.0 { "gain" } else { "loss" };
+        view! {
+            <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;">
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Bench. value".to_string() value=b_final size="sm".to_string() />
+                </BdCard>
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Bench. return".to_string() value=b_ret size="sm".to_string()
+                        delta_tone=b_tone.to_string() />
+                </BdCard>
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Bench. CAGR".to_string() value=b_cagr size="sm".to_string() />
+                </BdCard>
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Bench. MDD".to_string() value=b_mdd size="sm".to_string() />
+                </BdCard>
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Bench. Sharpe".to_string() value=b_sharpe size="sm".to_string() />
+                </BdCard>
+            </div>
+        }
+    });
+
+    let has_trades = r.trades.len() > 1;
+    let trade_count = r.trades.len();
+    let trade_title = format!("{} {}", trade_count, if trade_count == 1 { "fill" } else { "fills" });
+    let trade_ticker = r.trades.first().map(|t| t.ticker.clone()).unwrap_or_default();
+    let trades_dense = trade_count > 5;
+    let trades_view = if has_trades { trade_timeline(&r.trades, trades_dense) } else { view! {}.into_view() };
+    let equity_col  = if has_trades { "minmax(0,1.65fr)" } else { "1fr" };
+    let row_style   = format!("display:grid;grid-template-columns:{equity_col}{};gap:18px;align-items:start;",
+                              if has_trades { " minmax(300px,1fr)" } else { "" });
+
     view! {
         <div style="display:flex;flex-direction:column;gap:16px;">
-            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">
+            {bench_view}
+            <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;">
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Final value".to_string() value=final_str size="sm".to_string() />
+                </BdCard>
                 <BdCard padding="16px".to_string()>
                     <BdStat label="Total return".to_string() value=total_ret_s size="sm".to_string() />
                 </BdCard>
@@ -166,6 +287,7 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                 </BdCard>
             </div>
 
+            <div style=row_style>
             <BdCard tone="dark".to_string() overline=card_ol title=card_title>
                 <div style="position:absolute;top:16px;right:16px;">
                     <BdBadge tone=badge_tone.to_string()>{total_ret}</BdBadge>
@@ -180,11 +302,11 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                             </linearGradient>
                         </defs>
                         <line x1=x1s.clone() x2=x2s.clone() y1=gy1.clone() y2=gy1
-                              stroke="rgba(246,241,228,0.10)" stroke-width="1" stroke-dasharray="3 5" />
+                              stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
                         <line x1=x1s.clone() x2=x2s.clone() y1=gy2.clone() y2=gy2
-                              stroke="rgba(246,241,228,0.10)" stroke-width="1" stroke-dasharray="3 5" />
+                              stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
                         <line x1=x1s x2=x2s y1=gy3.clone() y2=gy3
-                              stroke="rgba(246,241,228,0.10)" stroke-width="1" stroke-dasharray="3 5" />
+                              stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
                         <path d=area fill="url(#bd_eq_grad)" />
                         <path d=line fill="none" stroke=color stroke-width="2.5"
                               stroke-linejoin="round" stroke-linecap="round" />
@@ -197,6 +319,18 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                     </div>
                 </div>
             </BdCard>
+
+            {has_trades.then(|| view! {
+                <BdCard overline="Executed trades".to_string() title=trade_title>
+                    <div style="position:absolute;top:16px;right:16px;">
+                        <BdBadge tone="neutral".to_string() soft=true>{trade_ticker}</BdBadge>
+                    </div>
+                    <div style="max-height:318px;overflow-y:auto;margin:0 -4px;padding:2px 4px;">
+                        {trades_view}
+                    </div>
+                </BdCard>
+            })}
+            </div>
 
             {bag.then(|| view! {
                 <div style="display:flex;gap:14px;align-items:flex-start;padding:18px 20px;\
@@ -236,7 +370,7 @@ fn equity_overlay(series: &[(String, BacktestResult)]) -> View {
     let series: Vec<&(String, BacktestResult)> =
         series.iter().filter(|(_, r)| r.curve.len() >= 2).collect();
     if series.is_empty() {
-        return view! { <p style="color:var(--text-on-ink-muted);">"Not enough data."</p> }.into_view();
+        return view! { <p style="color:var(--text-on-ink-muted);">"Not enough history to chart this one."</p> }.into_view();
     }
     let (mut dmin, mut dmax) = (i32::MAX, i32::MIN);
     let (mut ymin, mut ymax) = (f64::MAX, f64::MIN_POSITIVE);
@@ -287,9 +421,9 @@ fn equity_overlay(series: &[(String, BacktestResult)]) -> View {
         <div>
             <svg viewBox=vb width="100%" height=hs preserveAspectRatio="none"
                  style="display:block;overflow:visible;">
-                <line x1=x1s.clone() x2=x2s.clone() y1=gy1.clone() y2=gy1 stroke="rgba(246,241,228,0.10)" stroke-width="1" stroke-dasharray="3 5" />
-                <line x1=x1s.clone() x2=x2s.clone() y1=gy2.clone() y2=gy2 stroke="rgba(246,241,228,0.10)" stroke-width="1" stroke-dasharray="3 5" />
-                <line x1=x1s x2=x2s y1=gy3.clone() y2=gy3 stroke="rgba(246,241,228,0.10)" stroke-width="1" stroke-dasharray="3 5" />
+                <line x1=x1s.clone() x2=x2s.clone() y1=gy1.clone() y2=gy1 stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
+                <line x1=x1s.clone() x2=x2s.clone() y1=gy2.clone() y2=gy2 stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
+                <line x1=x1s x2=x2s y1=gy3.clone() y2=gy3 stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
                 {lines}
             </svg>
             <div style="display:flex;flex-wrap:wrap;gap:16px;margin-top:14px;">{legend}</div>
@@ -380,6 +514,31 @@ fn ConcernPanel(
     }
 }
 
+/// Index + uppercase title (+ optional italic question) — the heading that sits
+/// above each config field, matching the ConcernPanel headings.
+fn field_heading(step: Option<&str>, title: &str, question: Option<&str>) -> View {
+    let title = title.to_string();
+    let step  = step.map(str::to_string);
+    let question = question.map(str::to_string);
+    view! {
+        <div style="display:flex;flex-direction:column;gap:2px;padding-left:2px;">
+            <div style="display:flex;align-items:baseline;gap:7px;">
+                {step.map(|s| view! {
+                    <span style="font-family:var(--font-mono);font-weight:700;font-size:11px;\
+                                 color:var(--accent);">{s}</span>
+                })}
+                <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;\
+                             text-transform:uppercase;color:var(--text-strong);white-space:nowrap;">
+                    {title}
+                </span>
+            </div>
+            {question.map(|q| view! {
+                <span style="font-size:11.5px;color:var(--text-muted);font-style:italic;">{q}</span>
+            })}
+        </div>
+    }.into_view()
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 #[component]
@@ -398,6 +557,16 @@ fn App() -> impl IntoView {
     let entry_z       = create_rw_signal(2.0f64);
     let top_n         = create_rw_signal(3usize);
     let realistic     = create_rw_signal(false);
+    let initial_amount     = create_rw_signal(10_000.0f64);
+    let benchmark_ticker   = create_rw_signal("SPY".to_string());
+    let benchmark_strategy = create_rw_signal("buy_and_hold".to_string());
+    let show_benchmark     = create_rw_signal(false);
+
+    // Fetch universe once on mount for datalist autocomplete.
+    let universe = create_resource(
+        || (),
+        |_| async { get_json::<Vec<String>>("/api/universe").await.unwrap_or_default() },
+    );
 
     let busy          = create_rw_signal(false);
     let single_result = create_rw_signal::<Option<Result<BacktestResult, String>>>(None);
@@ -448,15 +617,34 @@ fn App() -> impl IntoView {
             });
         } else {
             let t = ticker.get();
-            let strategy = action_to_strategy(&a);
-            let f  = if a == "golden" { 50 } else { fast.get() };
-            let sl = if a == "golden" { 200 } else { slow.get() };
+            let a = action.get();
             let years = timeframe_years(&timeframe.get());
-            let rsi   = rsi_threshold.get();
-            let url = format!(
-                "/api/backtest?ticker={t}&strategy={strategy}&fast={f}&slow={sl}\
-                 &years={years}&rsi_threshold={rsi}"
-            );
+            let amt = initial_amount.get();
+            let bench_suffix = if show_benchmark.get() {
+                let bt = benchmark_ticker.get();
+                let bs = benchmark_strategy.get();
+                format!("&benchmark_ticker={bt}&benchmark_strategy={bs}")
+            } else { String::new() };
+            let url = if a == "congress" {
+                format!(
+                    "/api/backtest?ticker={t}&strategy=congress_copy_trade&year=2023\
+                     &use_filing_date={}&years={years}&initial_amount={amt}{bench_suffix}",
+                    realistic.get()
+                )
+            } else if a == "cramer" {
+                format!("/api/backtest?ticker={t}&strategy=cramer_inverse&years={years}&initial_amount={amt}{bench_suffix}")
+            } else if a == "short_squeeze" {
+                format!("/api/backtest?ticker={t}&strategy=short_squeeze&years={years}&initial_amount={amt}{bench_suffix}")
+            } else {
+                let strategy = action_to_strategy(&a);
+                let f  = if a == "golden" { 50 } else { fast.get() };
+                let sl = if a == "golden" { 200 } else { slow.get() };
+                let rsi   = rsi_threshold.get();
+                format!(
+                    "/api/backtest?ticker={t}&strategy={strategy}&fast={f}&slow={sl}\
+                     &years={years}&rsi_threshold={rsi}&initial_amount={amt}{bench_suffix}"
+                )
+            };
             busy.set(true); candidates.set(None);
             spawn_local(async move {
                 single_result.set(Some(get_json::<BacktestResult>(&url).await));
@@ -498,17 +686,111 @@ fn App() -> impl IntoView {
     };
 
     view! {
-        <main style="max-width:820px;margin:2rem auto;padding:0 var(--gutter);\
-                     display:flex;flex-direction:column;gap:28px;">
+        // ── Hero ──────────────────────────────────────────────────────────────
+        <section class="bd-grain" style="position:relative;overflow:hidden;min-height:100vh;\
+                       background:var(--teal-700);display:flex;flex-direction:column;">
+            // Moon glow
+            <div style="position:absolute;top:-90px;right:-60px;width:340px;height:340px;\
+                        border-radius:50%;background:radial-gradient(circle at 40% 38%,\
+                        var(--rust-300),var(--rust-600) 70%,var(--rust-700));\
+                        opacity:0.22;filter:blur(2px);pointer-events:none;" />
+            // Brand mark
+            <header style="position:relative;z-index:2;display:flex;align-items:center;\
+                           padding:24px var(--gutter) 4px;max-width:1280px;width:100%;margin:0 auto;">
+                <img src="/assets/logo.png" alt="BagholderDeLorean"
+                     style="height:72px;width:auto;display:block;" />
+            </header>
+            // Hero grid
+            <div class="bd-hero-grid" style="position:relative;z-index:1;flex:1;display:grid;\
+                        gap:48px;align-items:center;max-width:1280px;width:100%;margin:0 auto;\
+                        padding:12px var(--gutter) 32px;">
+                <div style="animation:bd-rise 0.55s var(--ease-out) both;">
+                    <span style="display:inline-flex;align-items:center;gap:8px;\
+                                 font-family:var(--font-mono);font-weight:700;font-size:11px;\
+                                 letter-spacing:0.16em;text-transform:uppercase;color:var(--ink-800);\
+                                 background:var(--accent-soft);border:2px solid var(--ink-900);\
+                                 border-radius:var(--radius-full);padding:6px 13px;\
+                                 box-shadow:var(--shadow-hard-sm);margin-bottom:24px;">
+                        "Backtesting · time machine"
+                    </span>
+                    <h1 style="font-family:var(--font-display);font-weight:800;\
+                                font-size:clamp(40px,6vw,60px);line-height:0.98;\
+                                letter-spacing:-0.03em;margin:0 0 18px;color:var(--paper-50);">
+                        "Backtest before you " <span style="color:var(--accent-soft);">"baghold."</span>
+                    </h1>
+                    <p style="font-size:18px;line-height:1.55;color:var(--text-on-ink-muted);\
+                              max-width:440px;margin:0 0 4px;">
+                        "Send a trading strategy back in time and find out whether you'd have \
+                         gotten rich — or ended up holding the bag. Honest numbers, zero promises."
+                    </p>
+                    <p style="font-family:var(--font-mono);font-size:12px;\
+                              color:var(--text-on-ink-muted);margin:24px 0 0;">
+                        "Past performance is a vibe, not a promise."
+                    </p>
+                </div>
+                <div class="bd-hero-art" style="position:relative;display:flex;justify-content:center;">
+                    <div style="position:relative;animation:bd-pop 0.6s var(--ease-lurch) both;">
+                        <img src="/assets/bagholder-hero.png"
+                             alt="An old bagholder leaning on a DeLorean under a rust-colored moon"
+                             style="display:block;width:100%;max-width:440px;\
+                                    border:4px solid var(--ink-900);border-radius:20px;\
+                                    box-shadow:10px 12px 0 0 var(--ink-900);" />
+                        <div style="position:absolute;left:-28px;bottom:34px;\
+                                    animation:bd-chip 0.7s var(--ease-out) 0.25s both;\
+                                    background:var(--paper-50);border:3px solid var(--ink-900);\
+                                    border-radius:16px;box-shadow:5px 5px 0 0 var(--ink-900);\
+                                    padding:14px 18px;">
+                            <div style="font-family:var(--font-mono);font-weight:700;font-size:10.5px;\
+                                        letter-spacing:0.12em;text-transform:uppercase;\
+                                        color:var(--text-muted);">"Golden Cross · 2019→24"</div>
+                            <div style="display:flex;align-items:baseline;gap:10px;margin-top:4px;">
+                                <span style="font-family:var(--font-mono);font-weight:700;\
+                                             font-size:30px;color:var(--ink-900);">"+34.2%"</span>
+                                <span style="font-family:var(--font-body);font-weight:700;font-size:11px;\
+                                             color:var(--paper-50);background:var(--gain);\
+                                             border:2px solid var(--ink-900);border-radius:var(--radius-full);\
+                                             padding:3px 9px;">"vs +11% SPY"</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            // Scroll-down link (native anchor → smooth scroll, no JS)
+            <a href="#app" aria-label="Scroll to the app"
+               style="position:relative;z-index:2;align-self:center;margin-bottom:18px;\
+                      display:inline-flex;flex-direction:column;align-items:center;gap:2px;\
+                      color:var(--text-on-ink-muted);text-decoration:none;\
+                      font-family:var(--font-mono);font-size:11px;letter-spacing:0.1em;\
+                      text-transform:uppercase;">
+                "Run one yourself"
+                <span style="font-size:20px;line-height:1;animation:bd-bob 1.6s var(--ease-out) infinite;">"⌄"</span>
+            </a>
+        </section>
 
-            <header>
-                <h1 style="font-size:var(--text-display-sm);letter-spacing:var(--tracking-tight);\
-                            margin-bottom:4px;">"Bagholder DeLorean"</h1>
-                <p style="font-size:var(--text-sm);color:var(--text-muted);margin:0;">
-                    "What if you'd invested differently? Let's find out — and rub it in."
+        <main id="app" style="min-height:100vh;border-top:3px solid var(--ink-900);\
+                              background:var(--surface-page);">
+        <div style="max-width:1080px;margin:0 auto;padding:44px var(--gutter) 90px;\
+                    display:flex;flex-direction:column;gap:24px;">
+
+            // Section intro
+            <header style="display:flex;flex-direction:column;align-items:center;text-align:center;">
+                <h2 style="font-family:var(--font-display);font-weight:800;font-size:32px;\
+                           letter-spacing:-0.02em;color:var(--text-strong);margin:0 0 6px;">
+                    "Run a backtest"
+                </h2>
+                <p style="font-size:14.5px;color:var(--text-muted);margin:0;">
+                    "Choose what you trade and how you trade it, then send it back in time."
                 </p>
             </header>
 
+            // Datalist for ticker autocomplete — populated from /api/universe.
+            {move || universe.get().map(|tickers| view! {
+                <datalist id="tickers">
+                    {tickers.into_iter().map(|t| view! { <option value=t /> }).collect_view()}
+                </datalist>
+            })}
+
+            <BdCard padding="22px".to_string()>
             <section style="display:flex;flex-direction:column;gap:16px;">
 
                 // ── Two concern panels ────────────────────────────────────────
@@ -554,6 +836,7 @@ fn App() -> impl IntoView {
                                                 view! {
                                                     <BdInput mono=true placeholder="AAPL".to_string()
                                                         value=ticker.get_untracked()
+                                                        list="tickers".to_string()
                                                         on_input=Box::new(move |v| ticker.set(v.to_uppercase())) />
                                                 }.into_view()
                                             }}
@@ -590,6 +873,7 @@ fn App() -> impl IntoView {
                                             <option value="cycle">"Economic-Cycle Rotation"</option>
                                             <option value="cramer">"Inverse Cramer  ·  meme"</option>
                                             <option value="congress">"Congressional Copy-Trade  ·  meme"</option>
+                                            <option value="short_squeeze">"Short Squeeze  ·  meme"</option>
                                         </optgroup>
                                     </BdSelect>
                                     <div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;">
@@ -692,56 +976,112 @@ fn App() -> impl IntoView {
                     })
                 }}
 
-                // ── Timeframe + Run ───────────────────────────────────────────
+                // ── Amount · Timeframe · Benchmark · Run ──────────────────────
                 {move || {
-                    let a       = action.get();
-                    let has_p03 = matches!(a.as_str(), "sma"|"golden"|"btfd"|"pairs"|"sectorrot"|"congress");
-                    let step    = if has_p03 { "04" } else { "03" };
-                    let prst    = is_preset(&a);
-                    let scr     = sel_method.get() == "screen" && !prst;
-                    let is_busy = busy.get();
-                    let lbl     = if is_busy { "Running\u{2026}" } else if prst { "Run preset" } else if scr { "Run screen" } else { "Run backtest" };
+                    let a        = action.get();
+                    let has_p03  = matches!(a.as_str(), "sma"|"golden"|"btfd"|"pairs"|"sectorrot"|"congress");
+                    let step     = if has_p03 { "04" } else { "03" };
+                    let prst     = is_preset(&a);
+                    let scr      = sel_method.get() == "screen" && !prst;
+                    let is_busy  = busy.get();
+                    let show_bm  = show_benchmark.get();
+                    let lbl      = if is_busy { "Running\u{2026}" } else if prst { "Run preset" } else if scr { "Run screen" } else { "Run backtest" };
                     view! {
-                        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
-                            <div style="flex:1 1 280px;min-width:200px;display:flex;flex-direction:column;gap:9px;">
-                                <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
-                                    <span style="font-family:var(--font-mono);font-weight:700;font-size:11px;color:var(--accent);">{step}</span>
-                                    <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"Timeframe"</span>
+                        <div style="display:flex;flex-direction:column;gap:16px;">
+                            // Amount + Timeframe
+                            <div style="display:grid;\
+                                        grid-template-columns:repeat(auto-fit,minmax(220px,1fr));\
+                                        gap:14px;align-items:end;">
+                                <div style="display:flex;flex-direction:column;gap:9px;max-width:220px;">
+                                    {field_heading(None, "Amount $", Some("How much do you put in?"))}
+                                    <BdInput mono=true placeholder="10000".to_string()
+                                        value=format!("{:.0}", initial_amount.get_untracked())
+                                        on_input=Box::new(move |v| {
+                                            if let Ok(n) = v.parse::<f64>() {
+                                                if n > 0.0 { initial_amount.set(n); }
+                                            }
+                                        }) />
                                 </div>
-                                <BdTabs full_width=true
-                                    items=["1y","3y","5y","10y","Max"].iter().map(|t| TabItem {
-                                        value: t.to_string(), label: t.to_string()
-                                    }).collect()
-                                    value=timeframe.get()
-                                    on_change=Box::new(move |v| timeframe.set(v)) />
+                                <div style="display:flex;flex-direction:column;gap:9px;">
+                                    {field_heading(Some(step), "Timeframe", Some("How far back?"))}
+                                    <BdTabs full_width=true
+                                        items=["1y","3y","5y","10y","Max"].iter().map(|t| TabItem {
+                                            value: t.to_string(), label: t.to_string()
+                                        }).collect()
+                                        value=timeframe.get()
+                                        on_change=Box::new(move |v| timeframe.set(v)) />
+                                </div>
                             </div>
-                            <BdButton variant="primary".to_string() size="lg".to_string()
-                                disabled=is_busy on_click=Box::new(run)>
-                                {lbl}
-                            </BdButton>
+
+                            // Benchmark
+                            <div style="display:flex;flex-direction:column;gap:9px;">
+                                {field_heading(None, "Benchmark", Some("Compare against what?"))}
+                                <div style="display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;\
+                                            min-height:var(--control-md);">
+                                    <div style="height:var(--control-md);display:flex;align-items:center;">
+                                        <BdSwitch checked=show_bm
+                                            on_change=Box::new(move |v| show_benchmark.set(v))
+                                            label="Compare vs.".to_string() />
+                                    </div>
+                                    {show_bm.then(|| view! {
+                                        <div style="width:130px;">
+                                            <BdInput mono=true label="vs. ticker".to_string()
+                                                placeholder="SPY".to_string()
+                                                value=benchmark_ticker.get()
+                                                on_input=Box::new(move |v| benchmark_ticker.set(v.trim().to_uppercase())) />
+                                        </div>
+                                        <div style="flex:1 1 200px;min-width:180px;max-width:300px;">
+                                            <BdSelect label="vs. strategy".to_string()
+                                                on_change=Box::new(move |v| benchmark_strategy.set(v))>
+                                                <option value="buy_and_hold">"Buy and hold"</option>
+                                                <option value="sma_crossover">"SMA crossover (20/50)"</option>
+                                            </BdSelect>
+                                        </div>
+                                    })}
+                                </div>
+                            </div>
+
+                            // Run
+                            <div style="display:flex;justify-content:flex-end;">
+                                <BdButton variant="primary".to_string() size="lg".to_string()
+                                    disabled=is_busy on_click=Box::new(run)>
+                                    {lbl}
+                                </BdButton>
+                            </div>
                         </div>
                     }
                 }}
             </section>
+            </BdCard>
 
             // ── Results ───────────────────────────────────────────────────────
             {move || {
                 let is_busy = busy.get();
                 match (single_result.get(), candidates.get()) {
                     (None, None) if is_busy => view! {
-                        <div style="text-align:center;padding:var(--space-7) 0;color:var(--text-muted);">
-                            "\u{231b} Computing your wealth destruction\u{2026}"
-                        </div>
+                        <BdCard><div style="text-align:center;padding:var(--space-6) var(--space-4);">
+                            <span style="display:inline-block;width:32px;height:32px;\
+                                         border-radius:var(--radius-full);\
+                                         border:4px solid var(--paper-300);border-top-color:var(--accent);\
+                                         animation:bd-spin 0.8s linear infinite;margin-bottom:var(--space-4);" />
+                            <p style="font-family:var(--font-display);font-weight:var(--weight-bold);\
+                                      font-size:var(--text-lg);color:var(--text-strong);margin:0 0 4px;">
+                                "Spinning up the flux capacitor\u{2026}"
+                            </p>
+                            <p style="font-size:var(--text-sm);color:var(--text-muted);margin:0;">
+                                "Replaying the tape tick by tick."
+                            </p>
+                        </div></BdCard>
                     }.into_view(),
 
                     (Some(Err(e)), _) => view! {
-                        <BdCallout tone="loss".to_string() title="Error".to_string()>{e}</BdCallout>
+                        <BdCallout tone="loss".to_string() title="That didn\u{2019}t work".to_string()>{e}</BdCallout>
                     }.into_view(),
 
                     (Some(Ok(r)), _) => equity_single(&r, action_label(&action.get())),
 
                     (None, Some(Err(e))) => view! {
-                        <BdCallout tone="loss".to_string() title="Screen error".to_string()>{e}</BdCallout>
+                        <BdCallout tone="loss".to_string() title="The screen choked".to_string()>{e}</BdCallout>
                     }.into_view(),
 
                     (None, Some(Ok(cands))) => {
@@ -751,22 +1091,30 @@ fn App() -> impl IntoView {
 
                         let rows = cands.iter().map(|c| {
                             // Pre-clone all data from c so view! closures are 'static
-                            let t1   = c.ticker.clone();
-                            let t2   = c.ticker.clone();
+                            let t_box = c.ticker.clone();   // checkbox checked read
+                            let t_row = c.ticker.clone();   // row highlight read
                             let tdis = c.ticker.clone();
                             let ind  = c.industry.clone();
                             let pe_s = format!("{:.1}", c.pe);
                             let ipe  = format!("{:.1}", c.industry_median_pe);
                             let rpe  = format!("{:.2}", c.relative_pe);
                             view! {
-                                <tr>
-                                    <td style="padding:11px 6px;">
-                                        <input type="checkbox"
-                                            style="width:16px;height:16px;accent-color:var(--accent);"
-                                            prop:checked=move || selected.with(|s| s.contains(&t1))
-                                            on:change=move |_| selected.update(|s| {
-                                                if !s.remove(&t2) { s.insert(t2.clone()); }
-                                            }) />
+                                <tr style=move || format!(
+                                    "background:{};border-bottom:var(--border-hair) solid var(--border-soft);",
+                                    if selected.with(|s| s.contains(&t_row)) { "var(--surface-sunken)" }
+                                    else { "transparent" }
+                                )>
+                                    <td style="padding:11px 6px;width:34px;">
+                                        {move || {
+                                            let on = selected.with(|s| s.contains(&t_box));
+                                            let t  = t_box.clone();
+                                            view! {
+                                                <BdCheckbox checked=on
+                                                    on_change=Box::new(move |_| selected.update(|s| {
+                                                        if !s.remove(&t) { s.insert(t.clone()); }
+                                                    })) />
+                                            }
+                                        }}
                                     </td>
                                     <td style="padding:11px 6px;font-family:var(--font-mono);font-weight:700;\
                                                font-size:13.5px;color:var(--text-strong);">{tdis}</td>
@@ -905,14 +1253,40 @@ fn App() -> impl IntoView {
                     }
 
                     _ => view! {
-                        <div style="text-align:center;padding:var(--space-7) 0;color:var(--text-muted);">
-                            <div style="font-size:var(--text-title);margin-bottom:var(--space-2);">"⏱"</div>
-                            "Define a strategy and run."
-                        </div>
+                        <BdCard><div style="text-align:center;padding:var(--space-6) var(--space-4);color:var(--text-muted);">
+                            <span style="display:inline-flex;width:56px;height:56px;\
+                                         border-radius:var(--radius-full);background:var(--surface-sunken);\
+                                         border:var(--border-line) solid var(--ink-800);color:var(--ink-500);\
+                                         align-items:center;justify-content:center;font-size:var(--text-title);\
+                                         margin-bottom:var(--space-3);">"\u{23EA}"</span>
+                            <p style="font-family:var(--font-display);font-weight:var(--weight-bold);\
+                                      font-size:var(--text-lg);color:var(--text-strong);margin:0 0 4px;">
+                                "Define a strategy and run."
+                            </p>
+                            <p style="font-size:var(--text-sm);margin:0;">
+                                "Pick your inputs above, then send them back in time."
+                            </p>
+                        </div></BdCard>
                     }.into_view(),
                 }
             }}
+        </div>
         </main>
+
+        <footer style="background:var(--teal-800);border-top:3px solid var(--ink-900);">
+            <div style="max-width:860px;margin:0 auto;padding:18px var(--gutter);\
+                        display:flex;align-items:center;justify-content:space-between;\
+                        gap:16px;flex-wrap:wrap;">
+                <span style="font-family:var(--font-mono);font-size:12px;\
+                              letter-spacing:0.08em;color:var(--text-on-ink-muted);">
+                    "© 1985–2025 BagholderDeLorean"
+                </span>
+                <span style="font-family:var(--font-mono);font-size:11px;\
+                              color:var(--text-on-ink-muted);">
+                    "Past performance is a vibe, not a promise."
+                </span>
+            </div>
+        </footer>
     }
 }
 

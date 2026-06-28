@@ -149,7 +149,7 @@ pub fn BdBadge(
         "accent" => ("var(--accent)",   "var(--accent-soft)", "var(--rust-700)"),
         "gain"   => ("var(--gain)",     "var(--gain-200)",    "var(--gain-600)"),
         "loss"   => ("var(--loss)",     "var(--loss-200)",    "var(--loss-600)"),
-        "warn"   => ("var(--warn)",     "#f0e0b8",            "#8a6a18"),
+        "warn"   => ("var(--warn)",     "var(--warn-200)",    "var(--warn-600)"),
         _        => ("var(--ink-700)",  "var(--paper-200)",   "var(--ink-800)"),
     };
     let bg = if soft { soft_bg } else { solid_bg };
@@ -236,7 +236,7 @@ pub fn BdCallout(
         "accent" => ("var(--accent-soft)", "var(--accent)", "var(--rust-700)"),
         "gain"   => ("var(--gain-200)",    "var(--gain)",   "var(--gain-600)"),
         "loss"   => ("var(--loss-200)",    "var(--loss)",   "var(--loss-600)"),
-        "warn"   => ("#f3e6c2",            "var(--warn)",   "#8a6a18"),
+        "warn"   => ("var(--warn-200)",    "var(--warn)",   "var(--warn-600)"),
         _        => ("var(--paper-200)",   "var(--ink-700)", "var(--text-body)"),
     };
     let style = format!(
@@ -272,6 +272,7 @@ pub fn BdInput(
     #[prop(default = false)]         mono: bool,
     #[prop(default = String::new())] value: String,
     #[prop(optional)]                placeholder: Option<String>,
+    #[prop(optional)]                list: Option<String>,
     #[prop(optional)]                on_input: Option<Box<dyn Fn(String) + 'static>>,
 ) -> impl IntoView {
     let (focused, set_focused) = create_signal(false);
@@ -308,6 +309,7 @@ pub fn BdInput(
                 <input
                     prop:value=value
                     placeholder=placeholder.unwrap_or_default()
+                    list=list.unwrap_or_default()
                     style=input_style
                     on:focus=move |_| set_focused.set(true)
                     on:blur=move |_| set_focused.set(false)
@@ -497,6 +499,47 @@ pub fn BdSwitch(
                     {l}
                 </span>
             })}
+        </label>
+    }
+}
+
+// ─── BdCheckbox ──────────────────────────────────────────────────────────────
+// Brand selection box for table rows (ink border, accent fill + check when on).
+// Like BdSwitch, `checked` is static — wrap the call in a reactive closure so a
+// parent signal drives the visual state.
+
+#[component]
+pub fn BdCheckbox(
+    #[prop(default = false)] checked: bool,
+    #[prop(default = false)] disabled: bool,
+    #[prop(optional)]        on_change: Option<Box<dyn Fn(bool) + 'static>>,
+) -> impl IntoView {
+    let box_style = format!(
+        "position:relative;display:inline-flex;align-items:center;justify-content:center;\
+         width:20px;height:20px;flex:none;color:var(--paper-50);\
+         background:{};border:var(--border-line) solid var(--ink-800);\
+         border-radius:var(--radius-sm);box-shadow:var(--shadow-inset);\
+         transition:background var(--dur-fast) var(--ease-out);",
+        if checked { "var(--accent)" } else { "var(--surface-card)" },
+    );
+    view! {
+        <label style=format!(
+            "display:inline-flex;align-items:center;cursor:{};",
+            if disabled { "not-allowed" } else { "pointer" }
+        )>
+            <span style=box_style>
+                <input
+                    type="checkbox"
+                    prop:checked=checked
+                    disabled=disabled
+                    on:change=move |e| { if let Some(ref f) = on_change { f(event_target_checked(&e)); } }
+                    style="position:absolute;inset:0;opacity:0;margin:0;cursor:inherit;"
+                />
+                {checked.then(|| view! {
+                    <span style="font-family:var(--font-body);font-weight:var(--weight-bold);\
+                                 font-size:13px;line-height:1;">"\u{2713}"</span>
+                })}
+            </span>
         </label>
     }
 }

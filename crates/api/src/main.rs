@@ -10,10 +10,11 @@ use axum::{
     Json, Router,
 };
 use bagholder_core::{
-    econ_cycle_alloc, inverse_vol_alloc, local_minima, momentum_alloc, pairs_alloc, pe_history,
-    pe_series, run_multi_asset_backtest, run_portfolio_backtest, Bar, BacktestResult, BandConfig,
-    Candidate, CorporateAction, FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy,
-    SECTOR_ETFS,
+    econ_cycle_alloc, inverse_vol_alloc, local_minima, momentum_alloc,
+    pairs_alloc, pe_history, pe_series, run_event_backtest, run_signals_backtest, squeeze_signals,
+    run_multi_asset_backtest,
+    run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate, CongressTrade,
+    CorporateAction, FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy, SECTOR_ETFS,
 };
 use std::collections::HashMap;
 use bagholder_data::Store;
@@ -37,6 +38,10 @@ struct BacktestQuery {
     entry: Option<String>,
     /// Trough window for `entry=pe_min`, in trading days (default ~a quarter).
     pe_window: Option<usize>,
+    /// For strategy=congress_copy_trade: which year's disclosures to use (default: 2023).
+    year: Option<u32>,
+    /// For strategy=congress_copy_trade: true = use filing date (realistic), false = transaction date (naive).
+    use_filing_date: Option<bool>,
     /// Which trough to enter, counting back from most recent (0 = latest).
     /// Clamped to the available range.
     pe_index: Option<usize>,
@@ -45,6 +50,12 @@ struct BacktestQuery {
     rsi_threshold: Option<f64>,
     bb_period: Option<usize>,
     bb_std: Option<f64>,
+    /// Initial investment in dollars; defaults to $10 000.
+    initial_amount: Option<f64>,
+    /// Benchmark ticker to run a comparison backtest against (default: no benchmark).
+    benchmark_ticker: Option<String>,
+    /// Benchmark strategy string (default: "buy_and_hold").
+    benchmark_strategy: Option<String>,
 }
 
 fn default_strategy() -> String {
@@ -72,10 +83,98 @@ fn trim_years(mut bars: Vec<Bar>, years: Option<u32>) -> Vec<Bar> {
     bars
 }
 
+/// Convert congress trade records to `(execution_date, weight)` signal events.
+/// `weight` = 1.0 for purchases, 0.0 for sales. Caller chooses the date field.
+fn congress_disclosures(
+    trades: &[CongressTrade],
+    ticker: &str,
+    use_filing_date: bool,
+) -> Vec<(chrono::NaiveDate, f64)> {
+    let mut events: Vec<(chrono::NaiveDate, f64)> = trades
+        .iter()
+        .filter(|t| t.ticker.eq_ignore_ascii_case(ticker))
+        .map(|t| {
+            let date = if use_filing_date { t.filing_date } else { t.transaction_date };
+            let weight = if t.trade_type.contains("sale") { 0.0 } else { 1.0 };
+            (date, weight)
+        })
+        .collect();
+    events.sort_by_key(|(d, _)| *d);
+    events
+}
+
 async fn backtest(
     State(db): State<Db>,
     Query(q): Query<BacktestQuery>,
 ) -> Result<Json<BacktestResult>, (StatusCode, String)> {
+    // Inverse Cramer: separate path — fades Cramer calls (buy→short, sell→long).
+    if q.strategy == "cramer_inverse" {
+        let ticker = q.ticker.clone();
+        let (bars, calls) = tokio::task::spawn_blocking(move || {
+            let db = db.lock().unwrap();
+            let bars = db.ohlcv(&ticker)?;
+            let calls = db.cramer_calls(&ticker)?;
+            Ok::<_, anyhow::Error>((bars, calls))
+        })
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+
+        let mut events: Vec<(chrono::NaiveDate, f64)> = calls
+            .iter()
+            .map(|c| (c.date, if c.call == "buy" { -1.0 } else { 1.0 }))
+            .collect();
+        events.sort_by_key(|(d, _)| *d);
+        let bars = trim_years(bars, q.years);
+        let amount = q.initial_amount.unwrap_or(10_000.0);
+        return Ok(Json(run_event_backtest(&q.ticker, &bars, &events).with_amount(amount)));
+    }
+
+    // Short squeeze: high days-to-cover + upward momentum entry.
+    // ponytail: dtc_min=5 and window=20 hardcoded; add query params if users want knobs.
+    if q.strategy == "short_squeeze" {
+        let ticker = q.ticker.clone();
+        let (bars, si) = tokio::task::spawn_blocking(move || {
+            let db = db.lock().unwrap();
+            let bars = db.ohlcv(&ticker)?;
+            let si = db.short_interest(&ticker)?;
+            Ok::<_, anyhow::Error>((bars, si))
+        })
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+
+        let si_events: Vec<(chrono::NaiveDate, f64)> = si
+            .iter()
+            .map(|r| (r.settlement_date, r.days_to_cover))
+            .collect();
+        let bars = trim_years(bars, q.years);
+        let sigs = squeeze_signals(&bars, &si_events, 5.0, 20);
+        let amount = q.initial_amount.unwrap_or(10_000.0);
+        return Ok(Json(run_signals_backtest(&q.ticker, &bars, &sigs).with_amount(amount)));
+    }
+
+    // Congress copy-trade: separate path — uses external disclosure signals.
+    if q.strategy == "congress_copy_trade" {
+        let ticker = q.ticker.clone();
+        let year = q.year.unwrap_or(2023);
+        let use_filing = q.use_filing_date.unwrap_or(false);
+        let (bars, trades) = tokio::task::spawn_blocking(move || {
+            let db = db.lock().unwrap();
+            let bars = db.ohlcv(&ticker)?;
+            let trades = db.congress_trades(year)?;
+            Ok::<_, anyhow::Error>((bars, trades))
+        })
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+
+        let disclosures = congress_disclosures(&trades, &q.ticker, use_filing);
+        let bars = trim_years(bars, q.years);
+        let amount = q.initial_amount.unwrap_or(10_000.0);
+        return Ok(Json(run_event_backtest(&q.ticker, &bars, &disclosures).with_amount(amount)));
+    }
+
     let strategy = match q.strategy.as_str() {
         "sma_crossover" => Strategy::SmaCrossover {
             fast: q.fast.unwrap_or(20),
@@ -99,9 +198,10 @@ async fn backtest(
 
     let ticker = q.ticker.clone();
     let pe_min = q.entry.as_deref() == Some("pe_min");
+    let db_main = db.clone();
     // Blocking DB + network I/O must not run on the async runtime's workers.
     let (bars, eps, actions) = tokio::task::spawn_blocking(move || {
-        let db = db.lock().unwrap();
+        let db = db_main.lock().unwrap();
         let bars = db.ohlcv(&ticker)?;
         // Only the fundamentals fetch is conditional — skip it for plain runs.
         let eps = if pe_min {
@@ -116,7 +216,11 @@ async fn backtest(
     .map_err(internal)?
     .map_err(internal)?;
 
-    if pe_min {
+    let amount = q.initial_amount.unwrap_or(10_000.0);
+    let bench_ticker  = q.benchmark_ticker.clone();
+    let bench_strat   = q.benchmark_strategy.clone();
+    let years         = q.years;
+    let mut result = if pe_min {
         let series = pe_series(&bars, &eps);
         let window = q.pe_window.unwrap_or(63);
         let minima = local_minima(&series, window);
@@ -124,28 +228,60 @@ async fn backtest(
             return Err((StatusCode::UNPROCESSABLE_ENTITY,
                 "no P/E history to find a minimum (missing EPS?)".into()));
         }
-        // Step back from the most recent trough; clamp to what's available.
         let count = minima.len();
         let k = q.pe_index.unwrap_or(0).min(count - 1);
         let (entry_date, entry_pe) = series[minima[count - 1 - k]];
         let trimmed: Vec<Bar> = bars.into_iter().filter(|b| b.date >= entry_date).collect();
-        let mut result = run_portfolio_backtest(&q.ticker, &trimmed, &strategy, 10_000.0, &FillCosts::ZERO, 0.0, &actions);
-        result.entry_date = Some(entry_date);
-        result.entry_pe = Some(entry_pe);
-        result.entry_index = Some(k);
-        result.entry_count = Some(count);
-        Ok(Json(result))
+        let mut r = run_portfolio_backtest(&q.ticker, &trimmed, &strategy, amount, &FillCosts::ZERO, 0.0, &actions)
+            .with_amount(amount);
+        r.entry_date = Some(entry_date);
+        r.entry_pe = Some(entry_pe);
+        r.entry_index = Some(k);
+        r.entry_count = Some(count);
+        r
     } else {
-        Ok(Json(run_portfolio_backtest(
+        run_portfolio_backtest(
             &q.ticker,
             &trim_years(bars, q.years),
             &strategy,
-            10_000.0,
+            amount,
             &FillCosts::ZERO,
             0.0,
             &actions,
-        )))
+        ).with_amount(amount)
+    };
+
+    // Optional benchmark run — a second buy-and-hold (or configured strategy) on a separate ticker.
+    if let Some(bt) = bench_ticker {
+        let db2 = db.clone();
+        let bt2 = bt.clone();
+        let bench_result = tokio::task::spawn_blocking(move || {
+            let db = db2.lock().unwrap();
+            let bars = db.ohlcv(&bt2)?;
+            let actions: Vec<CorporateAction> = db.corporate_actions(&bt2)?;
+            Ok::<_, anyhow::Error>((bars, actions))
+        })
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+        let (bench_bars, bench_actions) = bench_result;
+        let bench_strategy = match bench_strat.as_deref().unwrap_or("buy_and_hold") {
+            "sma_crossover" => Strategy::SmaCrossover { fast: 20, slow: 50 },
+            _ => Strategy::BuyAndHold,
+        };
+        let b = run_portfolio_backtest(
+            &bt,
+            &trim_years(bench_bars, years),
+            &bench_strategy,
+            amount,
+            &FillCosts::ZERO,
+            0.0,
+            &bench_actions,
+        ).with_amount(amount);
+        result.benchmark = Some(Box::new(b));
     }
+
+    Ok(Json(result))
 }
 
 #[derive(Deserialize)]
@@ -217,6 +353,11 @@ async fn screen(
     .map_err(internal)?
     .map_err(internal)?;
     Ok(Json(candidates))
+}
+
+/// Returns the ticker symbols from DEFAULT_UNIVERSE as a JSON array of strings.
+async fn universe() -> Json<Vec<&'static str>> {
+    Json(bagholder_data::DEFAULT_UNIVERSE.iter().map(|(t, _)| *t).collect())
 }
 
 /// Multi-asset preset backtests: `GET /api/preset?kind=risk_parity&tickers=SPY,QQQ,GLD`
@@ -358,7 +499,10 @@ fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
 #[tokio::main]
 async fn main() {
     let db: Db = Arc::new(Mutex::new(
-        Store::open("bagholder.duckdb").expect("opening data store"),
+        Store::open(&format!(
+            "{}/bagholder.duckdb",
+            std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string())
+        )).expect("opening data store"),
     ));
 
     let app = Router::new()
@@ -367,6 +511,7 @@ async fn main() {
         .route("/api/fundamentals", get(fundamentals))
         .route("/api/pe_history", get(pe_history_handler))
         .route("/api/screen", get(screen))
+        .route("/api/universe", get(universe))
         // Serve the trunk-built frontend. Run `trunk build` in crates/web first.
         .fallback_service(ServeDir::new("crates/web/dist"))
         .layer(CorsLayer::permissive())
