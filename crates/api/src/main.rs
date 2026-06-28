@@ -14,7 +14,8 @@ use bagholder_core::{
     pairs_alloc, pe_history, pe_series, run_event_backtest, run_signals_backtest, squeeze_signals,
     run_multi_asset_backtest,
     run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate, CongressTrade,
-    CorporateAction, FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy, TaxSystem, SECTOR_ETFS,
+    run_portfolio_backtest_taxed,
+    CorporateAction, FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy, TaxConfig, TaxSystem, SECTOR_ETFS,
 };
 use std::collections::HashMap;
 use bagholder_data::Store;
@@ -232,6 +233,9 @@ async fn backtest(
     let bench_ticker  = q.benchmark_ticker.clone();
     let bench_strat   = q.benchmark_strategy.clone();
     let years         = q.years;
+    // Tax regime (F1 preset; F6 will override its knobs from the query). Realized
+    // capital-gains tax is applied to the main run; the benchmark stays pre-tax.
+    let tax_cfg = TaxConfig::preset(tax_system(q.tax.as_deref()));
     let mut result = if pe_min {
         let series = pe_series(&bars, &eps);
         let window = q.pe_window.unwrap_or(63);
@@ -244,7 +248,7 @@ async fn backtest(
         let k = q.pe_index.unwrap_or(0).min(count - 1);
         let (entry_date, entry_pe) = series[minima[count - 1 - k]];
         let trimmed: Vec<Bar> = bars.into_iter().filter(|b| b.date >= entry_date).collect();
-        let mut r = run_portfolio_backtest(&q.ticker, &trimmed, &strategy, amount, &FillCosts::ZERO, 0.0, &actions)
+        let mut r = run_portfolio_backtest_taxed(&q.ticker, &trimmed, &strategy, amount, &FillCosts::ZERO, 0.0, &actions, &tax_cfg)
             .with_amount(amount);
         r.entry_date = Some(entry_date);
         r.entry_pe = Some(entry_pe);
@@ -252,7 +256,7 @@ async fn backtest(
         r.entry_count = Some(count);
         r
     } else {
-        run_portfolio_backtest(
+        run_portfolio_backtest_taxed(
             &q.ticker,
             &trim_years(bars, q.years),
             &strategy,
@@ -260,9 +264,9 @@ async fn backtest(
             &FillCosts::ZERO,
             0.0,
             &actions,
+            &tax_cfg,
         ).with_amount(amount)
     };
-    result = result.with_tax_system(tax_system(q.tax.as_deref()));
 
     // Optional benchmark run — a second buy-and-hold (or configured strategy) on a separate ticker.
     if let Some(bt) = bench_ticker {
