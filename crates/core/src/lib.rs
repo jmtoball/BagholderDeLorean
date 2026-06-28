@@ -881,6 +881,7 @@ pub fn run_multi_asset_backtest(
                 curve: vec![],
                 metrics: compute_metrics(&[], &[]),
                 positions: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
+                initial_amount: 10_000.0, final_value: 0.0,
             },
         };
         let common = iter.fold(first, |acc, bars| {
@@ -927,7 +928,8 @@ pub fn run_multi_asset_backtest(
     let rets: Vec<f64> = curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect();
     let metrics = compute_metrics(&curve, &rets);
     // ponytail: positions left empty for multi-asset; add per-ticker summary when UI needs it.
-    BacktestResult { curve, metrics, positions: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None }
+    BacktestResult { curve, metrics, positions: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
+        initial_amount: 10_000.0, final_value: 0.0, }
 }
 
 /// 20-day trailing average daily volume at bar index `i` (excludes bar `i`).
@@ -1005,6 +1007,23 @@ pub struct BacktestResult {
     /// Total number of P/E troughs available to step through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry_count: Option<usize>,
+    /// Initial investment in dollars. Default $10 000 if not set by the caller.
+    #[serde(default = "default_initial_amount")]
+    pub initial_amount: f64,
+    /// Final portfolio value = `initial_amount × curve.last().equity`.
+    #[serde(default)]
+    pub final_value: f64,
+}
+
+fn default_initial_amount() -> f64 { 10_000.0 }
+
+impl BacktestResult {
+    /// Enriches the result with dollar values. Call this in the API after any backtest run.
+    pub fn with_amount(mut self, amount: f64) -> Self {
+        self.initial_amount = amount;
+        self.final_value = amount * self.curve.last().map(|p| p.equity).unwrap_or(1.0);
+        self
+    }
 }
 
 /// Close-to-close simulation. Equity starts at 1.0; each day applies
@@ -1036,6 +1055,8 @@ pub fn run_backtest(bars: &[Bar], strategy: &Strategy) -> BacktestResult {
         entry_pe: None,
         entry_index: None,
         entry_count: None,
+        initial_amount: 10_000.0,
+        final_value: 0.0,
     }
 }
 
@@ -1110,7 +1131,8 @@ pub fn run_portfolio_backtest(
         unrealized_pnl: unrealized,
     }];
 
-    BacktestResult { curve, metrics, positions, entry_date: None, entry_pe: None, entry_index: None, entry_count: None }
+    BacktestResult { curve, metrics, positions, entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
+        initial_amount: 10_000.0, final_value: 0.0, }
 }
 
 /// Point-in-time trailing P/E for each bar: `close / TTM EPS`, where TTM EPS is
@@ -1242,6 +1264,8 @@ pub fn run_signals_backtest(bars: &[Bar], signals: &[f64]) -> BacktestResult {
         entry_pe: None,
         entry_index: None,
         entry_count: None,
+        initial_amount: 10_000.0,
+        final_value: 0.0,
     }
 }
 

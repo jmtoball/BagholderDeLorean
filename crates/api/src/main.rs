@@ -50,6 +50,8 @@ struct BacktestQuery {
     rsi_threshold: Option<f64>,
     bb_period: Option<usize>,
     bb_std: Option<f64>,
+    /// Initial investment in dollars; defaults to $10 000.
+    initial_amount: Option<f64>,
 }
 
 fn default_strategy() -> String {
@@ -120,7 +122,8 @@ async fn backtest(
             .collect();
         events.sort_by_key(|(d, _)| *d);
         let bars = trim_years(bars, q.years);
-        return Ok(Json(run_event_backtest(&bars, &events)));
+        let amount = q.initial_amount.unwrap_or(10_000.0);
+        return Ok(Json(run_event_backtest(&bars, &events).with_amount(amount)));
     }
 
     // Short squeeze: high days-to-cover + upward momentum entry.
@@ -143,7 +146,8 @@ async fn backtest(
             .collect();
         let bars = trim_years(bars, q.years);
         let sigs = squeeze_signals(&bars, &si_events, 5.0, 20);
-        return Ok(Json(run_signals_backtest(&bars, &sigs)));
+        let amount = q.initial_amount.unwrap_or(10_000.0);
+        return Ok(Json(run_signals_backtest(&bars, &sigs).with_amount(amount)));
     }
 
     // Congress copy-trade: separate path — uses external disclosure signals.
@@ -163,7 +167,8 @@ async fn backtest(
 
         let disclosures = congress_disclosures(&trades, &q.ticker, use_filing);
         let bars = trim_years(bars, q.years);
-        return Ok(Json(run_event_backtest(&bars, &disclosures)));
+        let amount = q.initial_amount.unwrap_or(10_000.0);
+        return Ok(Json(run_event_backtest(&bars, &disclosures).with_amount(amount)));
     }
 
     let strategy = match q.strategy.as_str() {
@@ -206,6 +211,7 @@ async fn backtest(
     .map_err(internal)?
     .map_err(internal)?;
 
+    let amount = q.initial_amount.unwrap_or(10_000.0);
     if pe_min {
         let series = pe_series(&bars, &eps);
         let window = q.pe_window.unwrap_or(63);
@@ -219,7 +225,8 @@ async fn backtest(
         let k = q.pe_index.unwrap_or(0).min(count - 1);
         let (entry_date, entry_pe) = series[minima[count - 1 - k]];
         let trimmed: Vec<Bar> = bars.into_iter().filter(|b| b.date >= entry_date).collect();
-        let mut result = run_portfolio_backtest(&q.ticker, &trimmed, &strategy, 10_000.0, &FillCosts::ZERO, 0.0, &actions);
+        let mut result = run_portfolio_backtest(&q.ticker, &trimmed, &strategy, amount, &FillCosts::ZERO, 0.0, &actions)
+            .with_amount(amount);
         result.entry_date = Some(entry_date);
         result.entry_pe = Some(entry_pe);
         result.entry_index = Some(k);
@@ -230,11 +237,11 @@ async fn backtest(
             &q.ticker,
             &trim_years(bars, q.years),
             &strategy,
-            10_000.0,
+            amount,
             &FillCosts::ZERO,
             0.0,
             &actions,
-        )))
+        ).with_amount(amount)))
     }
 }
 

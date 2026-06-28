@@ -80,6 +80,15 @@ fn fmt_pct(x: f64) -> String {
     let v = x * 100.0;
     format!("{}{:.1}%", if v >= 0.0 { "+" } else { "\u{2212}" }, v.abs())
 }
+fn fmt_money(x: f64) -> String {
+    if x.abs() >= 1_000_000.0 {
+        format!("${:.2}M", x / 1_000_000.0)
+    } else if x.abs() >= 1_000.0 {
+        format!("${:.0}", x)
+    } else {
+        format!("${:.2}", x)
+    }
+}
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 
@@ -134,7 +143,9 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     let total_ret_s  = total_ret.clone(); // for BdStat (badge below owns original)
     let badge_tone   = if win { "gain" } else { "loss" };
     let card_title   = if win { "You'd have made money" } else { "You'd have lost money" }.to_string();
-    let card_ol      = format!("{label} · starts at $10,000");
+    let init_str     = fmt_money(r.initial_amount);
+    let card_ol      = format!("{label} · starts at {init_str}");
+    let final_str    = fmt_money(r.final_value);
     let cagr_str     = format!("{} /yr", fmt_pct(r.metrics.cagr));
     let mdd_str      = fmt_pct(r.metrics.max_drawdown);
     let sharpe_str   = format!("{:.2}", r.metrics.sharpe);
@@ -153,7 +164,10 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
 
     view! {
         <div style="display:flex;flex-direction:column;gap:16px;">
-            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;">
+            <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;">
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Final value".to_string() value=final_str size="sm".to_string() />
+                </BdCard>
                 <BdCard padding="16px".to_string()>
                     <BdStat label="Total return".to_string() value=total_ret_s size="sm".to_string() />
                 </BdCard>
@@ -400,6 +414,7 @@ fn App() -> impl IntoView {
     let entry_z       = create_rw_signal(2.0f64);
     let top_n         = create_rw_signal(3usize);
     let realistic     = create_rw_signal(false);
+    let initial_amount = create_rw_signal(10_000.0f64);
 
     // Fetch universe once on mount for datalist autocomplete.
     let universe = create_resource(
@@ -458,16 +473,17 @@ fn App() -> impl IntoView {
             let t = ticker.get();
             let a = action.get();
             let years = timeframe_years(&timeframe.get());
+            let amt = initial_amount.get();
             let url = if a == "congress" {
                 format!(
                     "/api/backtest?ticker={t}&strategy=congress_copy_trade&year=2023\
-                     &use_filing_date={}&years={years}",
+                     &use_filing_date={}&years={years}&initial_amount={amt}",
                     realistic.get()
                 )
             } else if a == "cramer" {
-                format!("/api/backtest?ticker={t}&strategy=cramer_inverse&years={years}")
+                format!("/api/backtest?ticker={t}&strategy=cramer_inverse&years={years}&initial_amount={amt}")
             } else if a == "short_squeeze" {
-                format!("/api/backtest?ticker={t}&strategy=short_squeeze&years={years}")
+                format!("/api/backtest?ticker={t}&strategy=short_squeeze&years={years}&initial_amount={amt}")
             } else {
                 let strategy = action_to_strategy(&a);
                 let f  = if a == "golden" { 50 } else { fast.get() };
@@ -475,7 +491,7 @@ fn App() -> impl IntoView {
                 let rsi   = rsi_threshold.get();
                 format!(
                     "/api/backtest?ticker={t}&strategy={strategy}&fast={f}&slow={sl}\
-                     &years={years}&rsi_threshold={rsi}"
+                     &years={years}&rsi_threshold={rsi}&initial_amount={amt}"
                 )
             };
             busy.set(true); candidates.set(None);
@@ -749,6 +765,19 @@ fn App() -> impl IntoView {
                     let lbl     = if is_busy { "Running\u{2026}" } else if prst { "Run preset" } else if scr { "Run screen" } else { "Run backtest" };
                     view! {
                         <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
+                            // Amount input
+                            <div style="flex:0 1 160px;min-width:140px;display:flex;flex-direction:column;gap:9px;">
+                                <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
+                                    <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"Amount $"</span>
+                                </div>
+                                <BdInput mono=true placeholder="10000".to_string()
+                                    value=format!("{:.0}", initial_amount.get_untracked())
+                                    on_input=Box::new(move |v| {
+                                        if let Ok(n) = v.parse::<f64>() {
+                                            if n > 0.0 { initial_amount.set(n); }
+                                        }
+                                    }) />
+                            </div>
                             <div style="flex:1 1 280px;min-width:200px;display:flex;flex-direction:column;gap:9px;">
                                 <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
                                     <span style="font-family:var(--font-mono);font-weight:700;font-size:11px;color:var(--accent);">{step}</span>
