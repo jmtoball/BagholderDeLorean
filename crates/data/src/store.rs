@@ -2,10 +2,9 @@
 //! SQL, fast range scans for backtests. OHLCV is a wide table; fundamentals is
 //! tall (`ticker, period, metric, value`) so the metric set stays open-ended.
 
-use crate::{download_cik_map, download_congress_trades, download_corporate_actions, download_cramer_calls, download_fred_series, download_fundamentals, download_minute_bars, download_ohlcv, download_short_interest};
+use crate::{download_cik_map, download_congress_trades, download_corporate_actions, download_cramer_calls, download_fred_series, download_fundamentals, download_ohlcv, download_short_interest};
 use crate::cramer::CramerCall;
 use crate::finra::ShortInterest;
-use bagholder_core::MinuteBar;
 use anyhow::{Context, Result};
 use bagholder_core::{Bar, CaKind, CongressTrade, CorporateAction, Fundamental};
 use chrono::NaiveDate;
@@ -74,18 +73,6 @@ CREATE TABLE IF NOT EXISTS short_interest (
 );
 -- Per-ticker sentinel; full history fetched once and cached.
 CREATE TABLE IF NOT EXISTS short_interest_fetched (ticker TEXT PRIMARY KEY);
-CREATE TABLE IF NOT EXISTS minute_bars (
-  ticker TEXT NOT NULL,
-  ts     TIMESTAMP NOT NULL,
-  open   DOUBLE NOT NULL,
-  high   DOUBLE NOT NULL,
-  low    DOUBLE NOT NULL,
-  close  DOUBLE NOT NULL,
-  volume DOUBLE NOT NULL,
-  PRIMARY KEY (ticker, ts)
-);
--- ponytail: no date-range tracking; re-fetch by deleting from this table.
-CREATE TABLE IF NOT EXISTS minute_bars_fetched (ticker TEXT PRIMARY KEY);
 ";
 
 /// Strip Stooq's exchange suffix and upper-case, so "AAPL.US" -> "AAPL" and
@@ -455,58 +442,6 @@ impl Store {
             )?;
             for r in records {
                 stmt.execute(params![r.ticker, r.settlement_date, r.short_qty, r.days_to_cover])?;
-            }
-        }
-        self.conn.execute_batch("COMMIT")?;
-        Ok(())
-    }
-
-    /// Polygon.io minute bars for a ticker; fetches ~2yr window on first access.
-    /// Requires POLYGON_API_KEY env var. ponytail: no incremental update — delete
-    /// the row from minute_bars_fetched to force a refresh.
-    pub fn minute_bars(&self, ticker: &str) -> Result<Vec<MinuteBar>> {
-        let api_key = std::env::var("POLYGON_API_KEY")
-            .context("POLYGON_API_KEY env var not set")?;
-        let fetched: i64 = self.conn.query_row(
-            "SELECT count(*) FROM minute_bars_fetched WHERE ticker = ?",
-            [ticker], |r| r.get(0),
-        )?;
-        if fetched == 0 {
-            let to   = chrono::Local::now().date_naive();
-            let from = to - chrono::Duration::days(730);
-            let bars = download_minute_bars(ticker, &api_key, from, to)?;
-            self.write_minute_bars(ticker, &bars)?;
-            self.conn.execute(
-                "INSERT OR IGNORE INTO minute_bars_fetched VALUES (?)", [ticker],
-            )?;
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT ts, open, high, low, close, volume \
-             FROM minute_bars WHERE ticker = ? ORDER BY ts",
-        )?;
-        let rows = stmt
-            .query_map([ticker], |r| {
-                Ok(MinuteBar {
-                    ts: r.get(0)?,
-                    open: r.get(1)?,
-                    high: r.get(2)?,
-                    low: r.get(3)?,
-                    close: r.get(4)?,
-                    volume: r.get(5)?,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
-    fn write_minute_bars(&self, ticker: &str, bars: &[MinuteBar]) -> Result<()> {
-        self.conn.execute_batch("BEGIN")?;
-        {
-            let mut stmt = self.conn.prepare(
-                "INSERT OR IGNORE INTO minute_bars VALUES (?, ?, ?, ?, ?, ?, ?)",
-            )?;
-            for b in bars {
-                stmt.execute(params![ticker, b.ts, b.open, b.high, b.low, b.close, b.volume])?;
             }
         }
         self.conn.execute_batch("COMMIT")?;
