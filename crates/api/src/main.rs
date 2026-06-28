@@ -14,7 +14,7 @@ use bagholder_core::{
     pairs_alloc, pe_history, pe_series, run_event_backtest, run_signals_backtest, squeeze_signals,
     run_multi_asset_backtest,
     run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate, CongressTrade,
-    CorporateAction, FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy, SECTOR_ETFS,
+    CorporateAction, FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy, TaxSystem, SECTOR_ETFS,
 };
 use std::collections::HashMap;
 use bagholder_data::Store;
@@ -56,6 +56,18 @@ struct BacktestQuery {
     benchmark_ticker: Option<String>,
     /// Benchmark strategy string (default: "buy_and_hold").
     benchmark_strategy: Option<String>,
+    /// Tax regime: "us" | "de" | "none" (default). F2+ apply it; for now it is
+    /// recorded on the result so F6 can show which system was chosen.
+    tax: Option<String>,
+}
+
+/// Map the `tax=` query value to a `TaxSystem`; anything unrecognized = None.
+fn tax_system(tax: Option<&str>) -> TaxSystem {
+    match tax {
+        Some("us") => TaxSystem::UsFederal,
+        Some("de") => TaxSystem::Germany,
+        _ => TaxSystem::None,
+    }
 }
 
 fn default_strategy() -> String {
@@ -250,6 +262,7 @@ async fn backtest(
             &actions,
         ).with_amount(amount)
     };
+    result = result.with_tax_system(tax_system(q.tax.as_deref()));
 
     // Optional benchmark run — a second buy-and-hold (or configured strategy) on a separate ticker.
     if let Some(bt) = bench_ticker {

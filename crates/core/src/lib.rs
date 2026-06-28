@@ -866,7 +866,7 @@ pub fn run_multi_asset_backtest(
                 curve: vec![],
                 metrics: compute_metrics(&[], &[]),
                 positions: vec![], trades: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-                initial_amount: 10_000.0, final_value: 0.0, benchmark: None,
+                initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: TaxSystem::None,
             },
         };
         let common = iter.fold(first, |acc, bars| {
@@ -924,7 +924,7 @@ pub fn run_multi_asset_backtest(
     let metrics = compute_metrics(&curve, &rets);
     // ponytail: positions left empty for multi-asset; add per-ticker summary when UI needs it.
     BacktestResult { curve, metrics, positions: vec![], trades: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, }
+        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: TaxSystem::None, }
 }
 
 /// 20-day trailing average daily volume at bar index `i` (excludes bar `i`).
@@ -976,6 +976,133 @@ pub struct PositionSummary {
     pub unrealized_pnl: f64,
 }
 
+// ===== Tax simulation (Epic F) ===========================================
+// Income/capital-gains tax modelled as one knob struct + country presets.
+// Pure compute, WASM-clean (no I/O, no new deps). Default = TaxSystem::None =
+// no tax = today's behaviour. Rates verified against IRS.gov and
+// gesetze-im-internet.de; see plan/tax-simulation-spec.md. The bracket tables
+// are inputs, not constants of nature — re-verify before each tax year.
+
+/// Which tax regime to simulate. `None` reproduces the pre-tax result exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TaxSystem {
+    #[default]
+    None,
+    UsFederal,
+    Germany,
+}
+
+/// Lot-matching method at sale. FIFO is the default and DE-mandatory; HIFO
+/// (highest-cost-first — a US specific-ID strategy) realizes less gain. Applied
+/// in F2; the DE resolver ignores it (FIFO is law).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AccountingMethod {
+    #[default]
+    Fifo,
+    Hifo,
+}
+
+/// Tax knobs. `TaxConfig::preset` fills them for a `TaxSystem`; the API/UI then
+/// overrides the user-facing ones (income, church tax, allowance, …). One struct
+/// serves both systems — fields irrelevant to a system are unused by its resolver.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaxConfig {
+    pub system: TaxSystem,
+    pub accounting: AccountingMethod,
+    /// US: annual taxable income — places long-term gains in the 0/15/20 bracket
+    /// and trips the NIIT cliff. Ignored by DE (flat rate).
+    pub taxable_income: f64,
+    /// DE: church tax (Kirchensteuer) lifts the flat rate 26.375% → ~27.82%.
+    pub church_tax: bool,
+    /// DE: Sparerpauschbetrag, the annual tax-free allowance. US: 0 (none).
+    pub annual_allowance: f64,
+    /// DE ETF: Teilfreistellung — fraction of a fund's taxable base exempt
+    /// (0.30 equity / 0.15 mixed / 0.0 bond). Consumed by F5.
+    pub etf_teilfreistellung: f64,
+    /// DE ETF: accrue the Vorabpauschale (annual advance lump-sum). Consumed by F5.
+    pub vorabpauschale: bool,
+    /// DE ETF estimate mode (#61): treat every fund as a 30%-TFS equity fund,
+    /// skipping per-fund equity quotas. Opt-in; over-states bond/mixed funds.
+    pub estimate_all_etfs_equity: bool,
+}
+
+// US federal rate tables — 2025 single filer (IRS Rev. Proc. 2024-40).
+// (upper_bound_inclusive, marginal_rate); the final bound is +inf.
+const US_LT_BRACKETS: [(f64, f64); 3] =
+    [(48_350.0, 0.0), (533_400.0, 0.15), (f64::INFINITY, 0.20)];
+const US_ORDINARY_BRACKETS: [(f64, f64); 7] = [
+    (11_925.0, 0.10), (48_475.0, 0.12), (103_350.0, 0.22), (197_300.0, 0.24),
+    (250_525.0, 0.32), (626_350.0, 0.35), (f64::INFINITY, 0.37),
+];
+const US_NIIT_RATE: f64 = 0.038;
+/// Single-filer MAGI cliff (non-indexed). ponytail: taxable_income used as the
+/// MAGI proxy and single-filer assumed — add a filing-status knob if MFJ matters.
+const US_NIIT_THRESHOLD: f64 = 200_000.0;
+
+const DE_BASE_RATE: f64 = 0.26375; // 25% Abgeltungsteuer + 5.5% Soli
+/// 8% Kirchensteuer variant (the common case). ponytail: 9% → 27.99% not exposed
+/// — add a rate field if the church-tax state needs to vary.
+const DE_CHURCH_RATE: f64 = 0.2782;
+const DE_ALLOWANCE_SINGLE: f64 = 1_000.0; // Sparerpauschbetrag (single)
+
+/// Marginal rate for `income` from a `(upper_bound, rate)` bracket table.
+fn bracket_rate(table: &[(f64, f64)], income: f64) -> f64 {
+    table.iter().find(|(hi, _)| income <= *hi).map(|(_, r)| *r).unwrap_or(0.0)
+}
+
+impl Default for TaxConfig {
+    fn default() -> Self { Self::preset(TaxSystem::None) }
+}
+
+impl TaxConfig {
+    /// Country preset filling the knobs with sane defaults. User input
+    /// (income, church tax, allowance, …) overrides afterward.
+    pub fn preset(system: TaxSystem) -> Self {
+        TaxConfig {
+            system,
+            accounting: AccountingMethod::Fifo,
+            taxable_income: 100_000.0,
+            church_tax: false,
+            annual_allowance: match system {
+                TaxSystem::Germany => DE_ALLOWANCE_SINGLE,
+                _ => 0.0,
+            },
+            etf_teilfreistellung: 0.30,
+            vorabpauschale: matches!(system, TaxSystem::Germany),
+            estimate_all_etfs_equity: false,
+        }
+    }
+
+    /// Marginal tax rate on a realized capital gain. `holding_days` = calendar
+    /// days from entry to sale (US long-term at > 365; DE ignores it). US stacks
+    /// the NIIT surtax on top; `None` is always 0.
+    pub fn gains_tax_rate(&self, holding_days: i64) -> f64 {
+        match self.system {
+            TaxSystem::None => 0.0,
+            TaxSystem::UsFederal => {
+                let base = if holding_days > 365 {
+                    bracket_rate(&US_LT_BRACKETS, self.taxable_income)
+                } else {
+                    bracket_rate(&US_ORDINARY_BRACKETS, self.taxable_income)
+                };
+                base + self.us_niit()
+            }
+            TaxSystem::Germany => self.de_flat_rate(),
+        }
+    }
+
+    /// NIIT surtax (US): 3.8% once income clears the cliff, else 0. Stacks on
+    /// gains and qualified dividends.
+    pub fn us_niit(&self) -> f64 {
+        if self.taxable_income > US_NIIT_THRESHOLD { US_NIIT_RATE } else { 0.0 }
+    }
+
+    /// DE flat rate, with the church-tax surcharge when enabled.
+    pub fn de_flat_rate(&self) -> f64 {
+        if self.church_tax { DE_CHURCH_RATE } else { DE_BASE_RATE }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BacktestResult {
     pub curve: Vec<EquityPoint>,
@@ -1007,6 +1134,10 @@ pub struct BacktestResult {
     /// Optional comparison run (buy-and-hold SPY by default). Boxed to avoid infinite type size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub benchmark: Option<Box<BacktestResult>>,
+    /// Tax regime this run was computed under. `None` = pre-tax (today's result).
+    /// F2+ apply the tax; F6 displays it.
+    #[serde(default)]
+    pub tax_system: TaxSystem,
 }
 
 fn default_initial_amount() -> f64 { 10_000.0 }
@@ -1016,6 +1147,12 @@ impl BacktestResult {
     pub fn with_amount(mut self, amount: f64) -> Self {
         self.initial_amount = amount;
         self.final_value = amount * self.curve.last().map(|p| p.equity).unwrap_or(1.0);
+        self
+    }
+
+    /// Records which tax system produced this result (for display in F6).
+    pub fn with_tax_system(mut self, system: TaxSystem) -> Self {
+        self.tax_system = system;
         self
     }
 }
@@ -1103,7 +1240,7 @@ pub fn run_portfolio_backtest(
     }];
 
     BacktestResult { curve, metrics, positions, trades, entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, }
+        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: TaxSystem::None, }
 }
 
 /// Point-in-time trailing P/E for each bar: `close / TTM EPS`, where TTM EPS is
@@ -1249,6 +1386,7 @@ pub fn run_signals_backtest(ticker: &str, bars: &[Bar], signals: &[f64]) -> Back
         initial_amount: 10_000.0,
         final_value: 0.0,
         benchmark: None,
+        tax_system: TaxSystem::None,
     }
 }
 
@@ -1337,6 +1475,37 @@ fn compute_metrics(curve: &[EquityPoint], rets: &[f64]) -> Metrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn us_resolver_places_gains_in_right_bracket() {
+        let mut c = TaxConfig::preset(TaxSystem::UsFederal);
+        // $96k single filer: long-term gain → 15% bracket, no NIIT (< $200k).
+        c.taxable_income = 96_000.0;
+        assert!((c.gains_tax_rate(400) - 0.15).abs() < 1e-9); // > 1yr = long-term
+        assert!((c.gains_tax_rate(200) - 0.22).abs() < 1e-9); // ≤ 1yr = ordinary 22%
+        // Low income → 0% long-term bracket.
+        c.taxable_income = 30_000.0;
+        assert!(c.gains_tax_rate(400).abs() < 1e-9);
+        // High income → 20% long-term + 3.8% NIIT stacked.
+        c.taxable_income = 600_000.0;
+        assert!((c.gains_tax_rate(400) - (0.20 + 0.038)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn de_resolver_is_flat_regardless_of_holding_period() {
+        let mut c = TaxConfig::preset(TaxSystem::Germany);
+        assert!((c.gains_tax_rate(30) - 0.26375).abs() < 1e-9);
+        assert!((c.gains_tax_rate(4000) - 0.26375).abs() < 1e-9); // no holding split
+        c.church_tax = true;
+        assert!((c.gains_tax_rate(30) - 0.2782).abs() < 1e-9);
+    }
+
+    #[test]
+    fn none_system_taxes_nothing() {
+        let c = TaxConfig::preset(TaxSystem::None);
+        assert_eq!(c.gains_tax_rate(10), 0.0);
+        assert_eq!(c.gains_tax_rate(9999), 0.0);
+    }
 
     fn bar(d: &str, c: f64) -> Bar {
         Bar {
