@@ -14,8 +14,8 @@ use bagholder_core::{
     pairs_alloc, pe_history, pe_series, run_event_backtest, run_signals_backtest, squeeze_signals,
     run_multi_asset_backtest,
     run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate, CongressTrade,
-    run_portfolio_backtest_taxed,
-    CorporateAction, FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy, TaxConfig, TaxSystem, SECTOR_ETFS,
+    run_portfolio_backtest_taxed, is_fund_type,
+    CorporateAction, FillCosts, FundTax, Fundamental, PeHistory, RebalanceConfig, Strategy, TaxConfig, TaxSystem, SECTOR_ETFS,
 };
 use std::collections::HashMap;
 use bagholder_data::Store;
@@ -211,9 +211,10 @@ async fn backtest(
 
     let ticker = q.ticker.clone();
     let pe_min = q.entry.as_deref() == Some("pe_min");
+    let system = tax_system(q.tax.as_deref());
     let db_main = db.clone();
     // Blocking DB + network I/O must not run on the async runtime's workers.
-    let (bars, eps, actions) = tokio::task::spawn_blocking(move || {
+    let (bars, eps, actions, instrument_type) = tokio::task::spawn_blocking(move || {
         let db = db_main.lock().unwrap();
         let bars = db.ohlcv(&ticker)?;
         // Only the fundamentals fetch is conditional — skip it for plain runs.
@@ -223,7 +224,13 @@ async fn backtest(
             Vec::new()
         };
         let actions: Vec<CorporateAction> = db.corporate_actions(&ticker)?;
-        Ok::<_, anyhow::Error>((bars, eps, actions))
+        // German fund taxation needs the instrument type (rides the cached ohlcv).
+        let instrument_type = if system == TaxSystem::Germany {
+            db.instrument_type(&ticker).ok().flatten()
+        } else {
+            None
+        };
+        Ok::<_, anyhow::Error>((bars, eps, actions, instrument_type))
     })
     .await
     .map_err(internal)?
@@ -235,7 +242,17 @@ async fn backtest(
     let years         = q.years;
     // Tax regime (F1 preset; F6 will override its knobs from the query). Realized
     // capital-gains tax is applied to the main run; the benchmark stays pre-tax.
-    let tax_cfg = TaxConfig::preset(tax_system(q.tax.as_deref()));
+    let tax_cfg = TaxConfig::preset(system);
+    // Flag the ticker as a German fund (→ Vorabpauschale; Teilfreistellung when
+    // the estimate toggle, F6, is on). A direct stock stays `None`.
+    let fund = if system == TaxSystem::Germany
+        && instrument_type.as_deref().map(is_fund_type).unwrap_or(false)
+    {
+        let tfs = if tax_cfg.estimate_all_etfs_equity { 0.30 } else { 0.0 };
+        Some(FundTax { teilfreistellung: tfs, distributing: false })
+    } else {
+        None
+    };
     let mut result = if pe_min {
         let series = pe_series(&bars, &eps);
         let window = q.pe_window.unwrap_or(63);
@@ -248,7 +265,7 @@ async fn backtest(
         let k = q.pe_index.unwrap_or(0).min(count - 1);
         let (entry_date, entry_pe) = series[minima[count - 1 - k]];
         let trimmed: Vec<Bar> = bars.into_iter().filter(|b| b.date >= entry_date).collect();
-        let mut r = run_portfolio_backtest_taxed(&q.ticker, &trimmed, &strategy, amount, &FillCosts::ZERO, 0.0, &actions, &tax_cfg)
+        let mut r = run_portfolio_backtest_taxed(&q.ticker, &trimmed, &strategy, amount, &FillCosts::ZERO, 0.0, &actions, &tax_cfg, fund.as_ref())
             .with_amount(amount);
         r.entry_date = Some(entry_date);
         r.entry_pe = Some(entry_pe);
@@ -265,6 +282,7 @@ async fn backtest(
             0.0,
             &actions,
             &tax_cfg,
+            fund.as_ref(),
         ).with_amount(amount)
     };
 

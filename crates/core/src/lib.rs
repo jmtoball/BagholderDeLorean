@@ -1209,6 +1209,96 @@ impl TaxConfig {
     }
 }
 
+/// German fund taxation for the traded ticker (InvStG 2018). `None` = a direct
+/// stock (no Teilfreistellung, no Vorabpauschale). Built by the API from the
+/// ticker's Yahoo instrument type (#70) and the estimate-mode flag.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FundTax {
+    /// Teilfreistellung fraction exempt before tax (0.30 equity / 0.15 mixed /
+    /// 0.0 bond). In estimate mode every fund is treated as 0.30.
+    pub teilfreistellung: f64,
+    /// Distributing (pays out) vs accumulating. Carried for the UI/F3; the
+    /// Vorabpauschale nets down by the numeric distributions either way.
+    pub distributing: bool,
+}
+
+/// Whether a Yahoo `instrumentType` denotes a fund (vs a direct equity). Used to
+/// decide fund flagging and estimate-mode Teilfreistellung (#61).
+pub fn is_fund_type(instrument_type: &str) -> bool {
+    matches!(
+        instrument_type.to_ascii_uppercase().as_str(),
+        "ETF" | "MUTUALFUND" | "MONEYMARKET" | "FUND"
+    )
+}
+
+/// Year → BMF Basiszins for the Vorabpauschale (§18 InvStG). A published per-year
+/// input — 2021/22 were 0 (negative → floored); later years per BMF letters.
+/// Unknown future years default to 0 until BMF publishes. Re-verify annually.
+fn basiszins(year: i32) -> f64 {
+    match year {
+        2023 => 0.0255,
+        2024 => 0.0229,
+        2025 => 0.0253,
+        2026 => 0.0320,
+        _ => 0.0, // 2021/2022 = 0; future years until published
+    }
+}
+
+/// Vorabpauschale (§18 InvStG) for one year, before Teilfreistellung.
+/// `basisertrag = value_start × basiszins × 0.70 × proration`; the VAP is that
+/// netted down by `distributions` and clamped to `[0, value_gain + distributions]`
+/// — zero if the fund didn't rise. `proration` is the purchase-year factor
+/// (1.0 when held all year; −1/12 per full month before purchase).
+fn vorabpauschale(value_start: f64, value_gain: f64, distributions: f64, basiszins: f64, proration: f64) -> f64 {
+    let basisertrag = value_start * basiszins * 0.70 * proration;
+    let upper = (value_gain + distributions).max(0.0);
+    (basisertrag - distributions).clamp(0.0, upper)
+}
+
+/// Purchase-year proration for the Vorabpauschale: 1.0 once a full year is held,
+/// `(13 − purchase_month)/12` in the purchase year, 0 before the fund was bought.
+fn fund_proration(entry: Option<NaiveDate>, year: i32) -> f64 {
+    use chrono::Datelike;
+    match entry {
+        Some(d) if d.year() == year => (13 - d.month() as i32) as f64 / 12.0,
+        Some(d) if d.year() < year => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// Settle one calendar year for a German fund position: realized sale gains
+/// (Teilfreistellung-exempted, reduced by the §19 Vorabpauschale credit already
+/// taxed) plus this year's Vorabpauschale (also TFS-exempted), less the annual
+/// allowance, at the DE flat rate. Returns `(tax, new_loss_carry, new_cum_vap)`.
+#[allow(clippy::too_many_arguments)]
+fn settle_de_fund(
+    cfg: &TaxConfig, tfs: f64, realized_gain: f64,
+    value_start: f64, value_gain: f64, distributions: f64, basiszins: f64, proration: f64,
+    loss_carry: f64, cum_vap: f64,
+) -> (f64, f64, f64) {
+    let rate = cfg.de_flat_rate();
+
+    // Realized gains: net losses (this year + carry) against gains; remainder carries.
+    let gains = realized_gain.max(0.0);
+    let losses = (-realized_gain.min(0.0)) + (-loss_carry);
+    let net_gain = (gains - losses).max(0.0);
+    let new_carry = -(losses - gains).max(0.0);
+
+    // §19: reduce the gain by Vorabpauschalen already taxed (no double tax).
+    let vap_credit = cum_vap.min(net_gain);
+    let sale_base = (net_gain - vap_credit) * (1.0 - tfs);
+    let mut cum_vap = cum_vap - vap_credit;
+
+    // This year's Vorabpauschale, also Teilfreistellung-exempted.
+    let vap = vorabpauschale(value_start, value_gain, distributions, basiszins, proration);
+    cum_vap += vap;
+    let vap_base = vap * (1.0 - tfs);
+
+    let allow = cfg.annual_allowance;
+    let taxable = (sale_base + vap_base - allow).max(0.0);
+    (taxable * rate, new_carry, cum_vap)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BacktestResult {
     pub curve: Vec<EquityPoint>,
@@ -1320,7 +1410,7 @@ pub fn run_portfolio_backtest(
 ) -> BacktestResult {
     run_portfolio_backtest_taxed(
         ticker, bars, strategy, initial_cash, costs, rfr_daily, corporate_actions,
-        &TaxConfig::default(),
+        &TaxConfig::default(), None,
     )
 }
 
@@ -1330,7 +1420,10 @@ pub fn run_portfolio_backtest(
 /// compounds. The returned `curve` is the after-tax equity path and `total_tax`
 /// the cumulative tax. `TaxConfig::default()` (`None`) reproduces the pre-tax run
 /// bit-for-bit. Note: only realized gains are taxed — a never-selling buy-and-hold
-/// owes no capital-gains tax here (the German Vorabpauschale on funds lands in F5).
+/// owes no capital-gains tax here, except a German fund, which still accrues the
+/// annual Vorabpauschale. `fund` (DE only) flags the ticker as a fund and carries
+/// its Teilfreistellung %; `None` = a direct stock.
+#[allow(clippy::too_many_arguments)]
 pub fn run_portfolio_backtest_taxed(
     ticker: &str,
     bars: &[Bar],
@@ -1341,6 +1434,7 @@ pub fn run_portfolio_backtest_taxed(
     rfr_daily: f64,
     corporate_actions: &[CorporateAction],
     tax: &TaxConfig,
+    fund: Option<&FundTax>,
 ) -> BacktestResult {
     use chrono::Datelike;
     let mut gen = strategy.clone().into_generator();
@@ -1358,6 +1452,20 @@ pub fn run_portfolio_backtest_taxed(
     let mut year_lt = 0.0; // signed long-term realized gains this year
     let mut loss_carry = 0.0; // carried-forward capital loss (≤ 0)
     let mut total_tax = 0.0;
+
+    // German fund (InvStG 2018): Teilfreistellung on gains + Vorabpauschale. When
+    // `de_fund`, realized gains route to `year_fund_gain` and settle via the fund
+    // path (TFS + §19 VAP credit) instead of the generic ST/LT settlement.
+    let de_fund = tax.system == TaxSystem::Germany && fund.is_some();
+    let vap_on = de_fund && tax.vorabpauschale;
+    let tfs = fund.map(|f| f.teilfreistellung).unwrap_or(0.0);
+    let mut year_fund_gain = 0.0;     // signed realized fund gains this year (raw)
+    let mut year_distributions = 0.0; // fund payouts this year (0 until F3 dividends)
+    let mut cum_vap = 0.0;            // Vorabpauschalen taxed so far, awaiting §19 credit
+    let mut year_open_value = 0.0;    // fund position value at the year's first bar
+    let mut open_year: Option<i32> = None;
+    let mut prev_pos_val = 0.0;       // fund position value at the previous bar
+    let mut fund_entry: Option<NaiveDate> = None; // first purchase, for VAP proration
 
     for (i, bar) in bars.iter().enumerate() {
         // Overnight accruals from the previous bar's end-of-day state.
@@ -1377,12 +1485,28 @@ pub fn run_portfolio_backtest_taxed(
         let year = bar.date.year();
         if let Some(prev) = acct_year {
             if year != prev {
-                let (t, carry) = settle_year(tax, year_st, year_lt, loss_carry);
+                let t = if de_fund {
+                    let value_gain = prev_pos_val - year_open_value;
+                    let bz = if vap_on { basiszins(prev) } else { 0.0 };
+                    let pror = fund_proration(fund_entry, prev);
+                    let (t, carry, cv) = settle_de_fund(
+                        tax, tfs, year_fund_gain, year_open_value, value_gain,
+                        year_distributions, bz, pror, loss_carry, cum_vap,
+                    );
+                    loss_carry = carry;
+                    cum_vap = cv;
+                    year_fund_gain = 0.0;
+                    year_distributions = 0.0;
+                    t
+                } else {
+                    let (t, carry) = settle_year(tax, year_st, year_lt, loss_carry);
+                    loss_carry = carry;
+                    year_st = 0.0;
+                    year_lt = 0.0;
+                    t
+                };
                 portfolio.cash -= t;
                 total_tax += t;
-                loss_carry = carry;
-                year_st = 0.0;
-                year_lt = 0.0;
             }
         }
         acct_year = Some(year);
@@ -1419,10 +1543,32 @@ pub fn run_portfolio_backtest_taxed(
                 shares: delta.abs(),
             });
         }
+        if delta > 1e-9 && fund_entry.is_none() {
+            fund_entry = Some(bar.date); // first purchase, for VAP purchase-year proration
+        }
+
+        // Vorabpauschale fund value (post-trade): the opening value of each year
+        // (purchase value in the buy year, since the position is bought at bar 0)
+        // and the running year-end value. Both post-execute so a buy-and-hold's
+        // start value is its actual holding, not the pre-purchase zero.
+        let pos_val_after = portfolio.shares(ticker) * bar.close;
+        if open_year != Some(year) {
+            year_open_value = pos_val_after;
+            open_year = Some(year);
+        }
+        prev_pos_val = pos_val_after;
 
         // Bucket this bar's realized sales into the current year's taxable pool.
+        // German funds route to the fund pool (Teilfreistellung + §19); others
+        // split short-/long-term.
         for s in portfolio.realized_sales.drain(..) {
-            if s.holding_days > 365 { year_lt += s.gain } else { year_st += s.gain }
+            if de_fund {
+                year_fund_gain += s.gain;
+            } else if s.holding_days > 365 {
+                year_lt += s.gain;
+            } else {
+                year_st += s.gain;
+            }
         }
 
         // A buy may be a wash-sale replacement for a recent loss — back the
@@ -1434,9 +1580,20 @@ pub fn run_portfolio_backtest_taxed(
         }
     }
 
-    // Settle the final (partial) year so its realized gains aren't left untaxed.
-    // The curve is already built, so fold the withholding into the last point.
-    let (final_tax, _) = settle_year(tax, year_st, year_lt, loss_carry);
+    // Settle the final (partial) year so its realized gains (and a fund's last
+    // Vorabpauschale) aren't left untaxed. The curve is already built, so fold the
+    // withholding into the last point. ponytail: the real January-N+1 settlement
+    // falls outside the window — taxing it at the end keeps the after-tax number whole.
+    let final_tax = if de_fund {
+        let last_year = acct_year.unwrap_or(0);
+        let value_gain = prev_pos_val - year_open_value;
+        let bz = if vap_on { basiszins(last_year) } else { 0.0 };
+        let pror = fund_proration(fund_entry, last_year);
+        settle_de_fund(tax, tfs, year_fund_gain, year_open_value, value_gain,
+            year_distributions, bz, pror, loss_carry, cum_vap).0
+    } else {
+        settle_year(tax, year_st, year_lt, loss_carry).0
+    };
     if final_tax != 0.0 {
         portfolio.cash -= final_tax;
         total_tax += final_tax;
@@ -1834,6 +1991,83 @@ mod tests {
         assert!(lots.iter().any(|l| (l.entry_price - 800.0).abs() < 1e-9));
     }
 
+    // --- F5: German ETF taxation (Teilfreistellung + Vorabpauschale) --------
+
+    #[test]
+    fn fund_type_detection() {
+        assert!(is_fund_type("ETF"));
+        assert!(is_fund_type("mutualfund"));
+        assert!(!is_fund_type("EQUITY"));
+        assert!(!is_fund_type(""));
+    }
+
+    #[test]
+    fn vorabpauschale_clamps_nets_and_prorates() {
+        let base = 10_000.0 * 0.0229 * 0.70;
+        // Rose enough → full Basisertrag.
+        assert!((vorabpauschale(10_000.0, 2_000.0, 0.0, 0.0229, 1.0) - base).abs() < 1e-9);
+        // Fell → clamp to zero.
+        assert_eq!(vorabpauschale(10_000.0, -500.0, 0.0, 0.0229, 1.0), 0.0);
+        // Distributing fund nets the VAP down by distributions.
+        assert!((vorabpauschale(10_000.0, 2_000.0, 50.0, 0.0229, 1.0) - (base - 50.0)).abs() < 1e-9);
+        // Purchase-year proration.
+        assert!((vorabpauschale(10_000.0, 2_000.0, 0.0, 0.0229, 0.5) - base * 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn de_fund_taxes_vorabpauschale_after_teilfreistellung() {
+        let mut cfg = TaxConfig::preset(TaxSystem::Germany);
+        cfg.annual_allowance = 0.0; // isolate the VAP
+        // Accumulating equity ETF (30% TFS) rose across 2024 (Basiszins 0.0229).
+        let (tax, _carry, cumvap) =
+            settle_de_fund(&cfg, 0.30, 0.0, 10_000.0, 2_000.0, 0.0, 0.0229, 1.0, 0.0, 0.0);
+        let vap = 10_000.0 * 0.0229 * 0.70;
+        assert!((cumvap - vap).abs() < 1e-9);
+        assert!((tax - vap * (1.0 - 0.30) * 0.26375).abs() < 1e-6);
+    }
+
+    #[test]
+    fn de_fund_sale_credits_prior_vorabpauschale_then_applies_tfs() {
+        let mut cfg = TaxConfig::preset(TaxSystem::Germany);
+        cfg.annual_allowance = 0.0;
+        // $1,000 realized gain, $200 of VAP already taxed (§19 credit), 30% TFS,
+        // no new VAP (value flat). Base = (1000 − 200) × 0.70 = 560.
+        let (tax, _carry, cumvap) =
+            settle_de_fund(&cfg, 0.30, 1_000.0, 5_000.0, 0.0, 0.0, 0.0, 1.0, 0.0, 200.0);
+        assert!((tax - 560.0 * 0.26375).abs() < 1e-6);
+        assert!(cumvap.abs() < 1e-9, "the 200 credit is consumed");
+    }
+
+    // Monthly 2024 bars (Basiszins year) rising 100→200 — an accumulating fund.
+    fn rising_2024_bars() -> Vec<Bar> {
+        let p = [
+            ("2024-01-15", 100.0), ("2024-02-15", 108.0), ("2024-03-15", 117.0),
+            ("2024-04-15", 126.0), ("2024-05-15", 136.0), ("2024-06-15", 147.0),
+            ("2024-07-15", 158.0), ("2024-08-15", 169.0), ("2024-09-15", 178.0),
+            ("2024-10-15", 186.0), ("2024-11-15", 193.0), ("2024-12-15", 200.0),
+        ];
+        p.iter().map(|(d, c)| bar(d, *c)).collect()
+    }
+
+    #[test]
+    fn de_fund_buy_and_hold_accrues_vorabpauschale() {
+        let bars = rising_2024_bars();
+        let fund = FundTax { teilfreistellung: 0.0, distributing: false };
+        // Large stake so the VAP clears the €1,000 allowance.
+        let mut de = TaxConfig::preset(TaxSystem::Germany);
+        let with_vap = run_portfolio_backtest_taxed(
+            "ETF", &bars, &Strategy::BuyAndHold, 100_000.0, &FillCosts::ZERO, 0.0, &[], &de, Some(&fund),
+        );
+        assert!(with_vap.total_tax > 0.0, "a risen accumulating fund owes Vorabpauschale");
+
+        // With the Vorabpauschale off, the same buy-and-hold realizes nothing → no tax.
+        de.vorabpauschale = false;
+        let no_vap = run_portfolio_backtest_taxed(
+            "ETF", &bars, &Strategy::BuyAndHold, 100_000.0, &FillCosts::ZERO, 0.0, &[], &de, Some(&fund),
+        );
+        assert_eq!(no_vap.total_tax, 0.0);
+    }
+
     // A rise through 2020 then a 2021 crash, so an SMA crossover enters long and
     // later exits at a profit — realizing a gain that crosses a year boundary.
     fn rise_then_crash_bars() -> Vec<Bar> {
@@ -1859,7 +2093,7 @@ mod tests {
 
         let mut us = TaxConfig::preset(TaxSystem::UsFederal);
         us.taxable_income = 96_000.0;
-        let taxed = run_portfolio_backtest_taxed("X", &bars, &strat, 10_000.0, &FillCosts::ZERO, 0.0, &[], &us);
+        let taxed = run_portfolio_backtest_taxed("X", &bars, &strat, 10_000.0, &FillCosts::ZERO, 0.0, &[], &us, None);
         assert!(taxed.total_tax > 0.0, "a realized gain should be taxed");
         assert!(
             taxed.curve.last().unwrap().equity < pre.curve.last().unwrap().equity,
@@ -1867,7 +2101,7 @@ mod tests {
         );
 
         // tax=none reproduces the pre-tax run bit-for-bit.
-        let none = run_portfolio_backtest_taxed("X", &bars, &strat, 10_000.0, &FillCosts::ZERO, 0.0, &[], &TaxConfig::default());
+        let none = run_portfolio_backtest_taxed("X", &bars, &strat, 10_000.0, &FillCosts::ZERO, 0.0, &[], &TaxConfig::default(), None);
         assert_eq!(none.total_tax, 0.0);
         for (a, b) in none.curve.iter().zip(pre.curve.iter()) {
             assert_eq!(a.equity, b.equity);
