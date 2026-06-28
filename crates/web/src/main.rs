@@ -80,6 +80,13 @@ fn fmt_pct(x: f64) -> String {
     let v = x * 100.0;
     format!("{}{:.1}%", if v >= 0.0 { "+" } else { "\u{2212}" }, v.abs())
 }
+/// Ratios (Sharpe/Sortino/Recovery) — show "∞" for the no-downside / no-drawdown
+/// case instead of "inf" or a misleading "0.00". (An infinite sortino is sent as
+/// JSON null and deserializes to 0.0, so the infinite branch here is a guard.)
+fn fmt_ratio(x: f64) -> String {
+    if x.is_finite() { format!("{:.2}", x) } else { "\u{221e}".to_string() }
+}
+
 fn fmt_money(x: f64) -> String {
     if x.abs() >= 1_000_000.0 {
         format!("${:.2}M", x / 1_000_000.0)
@@ -213,7 +220,11 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     let final_str    = fmt_money(r.final_value);
     let cagr_str     = format!("{} /yr", fmt_pct(r.metrics.cagr));
     let mdd_str      = fmt_pct(r.metrics.max_drawdown);
-    let sharpe_str   = format!("{:.2}", r.metrics.sharpe);
+    let sharpe_str   = fmt_ratio(r.metrics.sharpe);
+    let sortino_str  = fmt_ratio(r.metrics.sortino);
+    // No drawdown → recovery factor is undefined (core returns 0.0); show ∞, not "0.00".
+    let recovery_str = if r.metrics.max_drawdown >= 0.0 { "\u{221e}".to_string() }
+                       else { fmt_ratio(r.metrics.recovery_factor) };
     let bag          = r.metrics.max_drawdown < -0.30;
     let opp_pct      = (r.metrics.max_drawdown.abs() * 100.0).round() as i64;
     let mdd_bag      = fmt_pct(r.metrics.max_drawdown);
@@ -228,14 +239,17 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     let sw   = format!("width:16px;height:3px;background:{color};border-radius:2px;");
 
     let bench_view = r.benchmark.as_ref().map(|b| {
-        let b_cagr   = format!("{} /yr", fmt_pct(b.metrics.cagr));
-        let b_mdd    = fmt_pct(b.metrics.max_drawdown);
-        let b_sharpe = format!("{:.2}", b.metrics.sharpe);
+        let b_cagr     = format!("{} /yr", fmt_pct(b.metrics.cagr));
+        let b_mdd      = fmt_pct(b.metrics.max_drawdown);
+        let b_sharpe   = fmt_ratio(b.metrics.sharpe);
+        let b_sortino  = fmt_ratio(b.metrics.sortino);
+        let b_recovery = if b.metrics.max_drawdown >= 0.0 { "\u{221e}".to_string() }
+                         else { fmt_ratio(b.metrics.recovery_factor) };
         let b_ret    = fmt_pct(b.metrics.total_return);
         let b_final  = fmt_money(b.final_value);
         let b_tone   = if b.metrics.total_return >= 0.0 { "gain" } else { "loss" };
         view! {
-            <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:12px;">
                 <BdCard padding="16px".to_string()>
                     <BdStat label="Bench. value".to_string() value=b_final size="sm".to_string() />
                 </BdCard>
@@ -251,6 +265,12 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                 </BdCard>
                 <BdCard padding="16px".to_string()>
                     <BdStat label="Bench. Sharpe".to_string() value=b_sharpe size="sm".to_string() />
+                </BdCard>
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Bench. Sortino".to_string() value=b_sortino size="sm".to_string() />
+                </BdCard>
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Bench. Recovery".to_string() value=b_recovery size="sm".to_string() />
                 </BdCard>
             </div>
         }
@@ -269,7 +289,7 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     view! {
         <div style="display:flex;flex-direction:column;gap:16px;">
             {bench_view}
-            <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:12px;">
                 <BdCard padding="16px".to_string()>
                     <BdStat label="Final value".to_string() value=final_str size="sm".to_string() />
                 </BdCard>
@@ -284,6 +304,12 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                 </BdCard>
                 <BdCard padding="16px".to_string()>
                     <BdStat label="Sharpe ratio".to_string() value=sharpe_str size="sm".to_string() />
+                </BdCard>
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Sortino ratio".to_string() value=sortino_str size="sm".to_string() />
+                </BdCard>
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Recovery factor".to_string() value=recovery_str size="sm".to_string() />
                 </BdCard>
             </div>
 
