@@ -513,16 +513,32 @@ fn App() -> impl IntoView {
     };
 
     view! {
+        // ── Hero banner ───────────────────────────────────────────────────────
+        <header style="background:var(--surface-ink);border-bottom:3px solid var(--ink-900);\
+                       padding:32px var(--gutter) 28px;">
+            <div style="max-width:820px;margin:0 auto;">
+                // Overline pill
+                <span style="display:inline-flex;align-items:center;gap:8px;\
+                              font-family:var(--font-mono);font-weight:700;font-size:10px;\
+                              letter-spacing:0.16em;text-transform:uppercase;\
+                              color:var(--ink-800);background:var(--accent-soft);\
+                              border:2px solid var(--ink-900);border-radius:var(--radius-full);\
+                              padding:5px 12px;box-shadow:var(--shadow-hard-sm);margin-bottom:14px;">
+                    "Backtesting Time Machine"
+                </span>
+                <h1 style="font-family:var(--font-display);font-weight:800;font-size:clamp(28px,5vw,48px);\
+                            letter-spacing:-0.03em;line-height:0.98;\
+                            color:var(--text-on-ink);margin:0 0 10px;">
+                    "Backtest before you " <span style="color:var(--accent-soft);">"baghold."</span>
+                </h1>
+                <p style="font-size:15px;line-height:1.5;color:var(--text-on-ink-muted);margin:0;">
+                    "Send a strategy back in time. Find out if you'd have gotten rich — or ended up holding the bag."
+                </p>
+            </div>
+        </header>
+
         <main style="max-width:820px;margin:2rem auto;padding:0 var(--gutter);\
                      display:flex;flex-direction:column;gap:28px;">
-
-            <header>
-                <h1 style="font-size:var(--text-display-sm);letter-spacing:var(--tracking-tight);\
-                            margin-bottom:4px;">"Bagholder DeLorean"</h1>
-                <p style="font-size:var(--text-sm);color:var(--text-muted);margin:0;">
-                    "What if you'd invested differently? Let's find out — and rub it in."
-                </p>
-            </header>
 
             <section style="display:flex;flex-direction:column;gap:16px;">
 
@@ -929,6 +945,22 @@ fn App() -> impl IntoView {
                 }
             }}
         </main>
+
+        <footer style="background:var(--teal-800);border-top:3px solid var(--ink-900);\
+                       margin-top:16px;">
+            <div style="max-width:860px;margin:0 auto;padding:18px var(--gutter);\
+                        display:flex;align-items:center;justify-content:space-between;\
+                        gap:16px;flex-wrap:wrap;">
+                <span style="font-family:var(--font-mono);font-size:12px;\
+                              letter-spacing:0.08em;color:var(--text-on-ink-muted);">
+                    "© 1985–2025 BagholderDeLorean"
+                </span>
+                <span style="font-family:var(--font-mono);font-size:11px;\
+                              color:var(--text-on-ink-muted);">
+                    "Past performance is a vibe, not a promise."
+                </span>
+            </div>
+        </footer>
     }
 }
 
