@@ -2,6 +2,8 @@
 //! Inline styles use CSS vars from ds.css. Hover/focus state uses reactive signals.
 //! ponytail: `checked`/`value` props are static bools/strings (not signals). Wrap
 //!   the component call in a reactive closure so the parent signal drives re-creation.
+//! ponytail: px are tokenized only where a token matches exactly; remaining raw px
+//!   are off-grid fine-tuning or control geometry with no token equivalent.
 
 use leptos::*;
 
@@ -100,7 +102,7 @@ pub fn BdCard(
     #[prop(default = "paper".to_string())]          tone: String,
     #[prop(optional)]                               overline: Option<String>,
     #[prop(optional)]                               title: Option<String>,
-    #[prop(default = "var(--space-5)".to_string())] padding: String,
+    #[prop(default = "var(--space-5)".to_string())] padding:String,
     children: Children,
 ) -> impl IntoView {
     let dark = tone == "dark";
@@ -121,7 +123,7 @@ pub fn BdCard(
                 <span style=format!(
                     "font-weight:var(--weight-bold);font-size:var(--text-micro);\
                      letter-spacing:var(--tracking-overline);text-transform:uppercase;\
-                     color:{ol_color};display:block;margin-bottom:4px;"
+                     color:{ol_color};display:block;margin-bottom:var(--space-1);"
                 )>{o}</span>
             })}
             {title.map(|t| view! {
@@ -155,7 +157,7 @@ pub fn BdBadge(
     let bg = if soft { soft_bg } else { solid_bg };
     let fg = if soft { soft_fg } else { "var(--paper-50)" };
     let style = format!(
-        "display:inline-flex;align-items:center;gap:4px;\
+        "display:inline-flex;align-items:center;gap:var(--space-1);\
          padding:3px 9px;font-family:var(--font-body);\
          font-weight:var(--weight-bold);font-size:var(--text-xs);\
          line-height:1.2;letter-spacing:0.01em;\
@@ -285,7 +287,7 @@ pub fn BdInput(
 
     let wrap_style = move || format!(
         "display:flex;align-items:center;gap:var(--space-2);\
-         height:{height};padding:0 12px;background:var(--surface-card);\
+         height:{height};padding:0 var(--space-3);background:var(--surface-card);\
          border:var(--border-line) solid {border_c};\
          border-radius:var(--radius-md);\
          box-shadow:{};transition:box-shadow var(--dur-fast) var(--ease-out);",
@@ -351,7 +353,7 @@ pub fn BdSelect(
     );
     let select_style = format!(
         "appearance:none;-webkit-appearance:none;width:100%;height:100%;\
-         padding:0 36px 0 12px;border:none;outline:none;background:transparent;\
+         padding:0 36px 0 var(--space-3);border:none;outline:none;background:transparent;\
          font-family:var(--font-body);font-size:{font_size};\
          font-weight:var(--weight-medium);color:var(--text-body);cursor:pointer;"
     );
@@ -375,8 +377,8 @@ pub fn BdSelect(
                 <span aria-hidden="true" style="\
                     position:absolute;right:12px;top:50%;transform:translateY(-50%);\
                     width:9px;height:9px;\
-                    border-right:2px solid var(--ink-800);\
-                    border-bottom:2px solid var(--ink-800);\
+                    border-right:var(--border-line) solid var(--ink-800);\
+                    border-bottom:var(--border-line) solid var(--ink-800);\
                     rotate:45deg;pointer-events:none;margin-top:-3px;" />
             </span>
             {hint.map(|h| view! {
@@ -558,7 +560,7 @@ pub fn BdTag(
     let on_remove  = on_remove.map(std::rc::Rc::new);
 
     let style = format!(
-        "display:inline-flex;align-items:center;gap:6px;padding:4px 10px;\
+        "display:inline-flex;align-items:center;gap:6px;padding:var(--space-1) 10px;\
          font-family:var(--font-mono);font-size:var(--text-xs);\
          font-weight:var(--weight-bold);letter-spacing:0.01em;\
          color:{};background:{};\

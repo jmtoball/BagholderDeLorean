@@ -1,6 +1,12 @@
 //! Bagholder DeLorean — two-concern backtesting UI.
 //! Stock selection (what to trade) × Trade action (when to get in/out).
 //! Presets bypass the two-panel structure when selection and action are inseparable.
+//!
+//! ponytail: inline-style px are tokenized (`--space-*`/`--text-*`/`--radius-*`/
+//!   `--border-*`) only where a token matches exactly. Remaining raw px are
+//!   deliberate: off-grid fine-tuning (7/9/11/13/14/18px, 11.5/13.5px) with no
+//!   token, or layout/illustration geometry (chart W/H, max-widths, absolute
+//!   offsets, image sizes) that isn't on the spacing scale — don't force a token.
 
 pub mod components;
 
@@ -137,7 +143,7 @@ fn to_pts(result: &BacktestResult) -> Option<Vec<(f64, f64)>> {
 fn trade_timeline(trades: &[TradeEvent], dense: bool) -> View {
     if trades.is_empty() {
         return view! {
-            <div style="text-align:center;padding:32px 16px;color:var(--text-muted);font-size:var(--text-sm);font-family:var(--font-mono);">
+            <div style="text-align:center;padding:var(--space-6) var(--space-4);color:var(--text-muted);font-size:var(--text-sm);font-family:var(--font-mono);">
                 "No trades executed. Bold of you."
             </div>
         }.into_view();
@@ -165,9 +171,9 @@ fn trade_timeline(trades: &[TradeEvent], dense: bool) -> View {
         let col_style  = format!("position:relative;width:{marker_ss}px;flex:0 0 {marker_ss}px;display:flex;justify-content:center;");
         let spine_style= format!("position:absolute;top:{spine_top};bottom:{spine_bot};left:50%;width:2px;margin-left:-1px;background:var(--border-soft);");
         let dot_style  = format!("position:relative;z-index:1;width:{marker_ss}px;height:{marker_ss}px;flex:0 0 auto;border-radius:var(--radius-full);background:{tone_soft};border:var(--border-line) solid var(--ink-900);box-shadow:var(--shadow-hard-sm);display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-weight:var(--weight-bold);font-size:17px;color:var(--ink-900);");
-        let body_style = format!("flex:1;min-width:0;padding-bottom:{row_pb};padding-top:4px;");
+        let body_style = format!("flex:1;min-width:0;padding-bottom:{row_pb};padding-top:var(--space-1);");
         let tick_style = format!("font-family:var(--font-mono);font-weight:var(--weight-bold);font-size:{font_size};letter-spacing:0.01em;color:var(--text-strong);");
-        let pill_style = format!("display:inline-flex;align-items:center;line-height:1;font-family:var(--font-body);font-weight:var(--weight-bold);font-size:var(--text-micro);letter-spacing:var(--tracking-overline);text-transform:uppercase;color:var(--paper-50);background:{tone_color};border:var(--border-hair) solid var(--ink-900);border-radius:var(--radius-full);padding:3px 8px;");
+        let pill_style = format!("display:inline-flex;align-items:center;line-height:1;font-family:var(--font-body);font-weight:var(--weight-bold);font-size:var(--text-micro);letter-spacing:var(--tracking-overline);text-transform:uppercase;color:var(--paper-50);background:{tone_color};border:var(--border-hair) solid var(--ink-900);border-radius:var(--radius-full);padding:3px var(--space-2);");
         view! {
             <li style="display:flex;align-items:stretch;gap:var(--space-3);">
                 <div style=col_style>
@@ -181,7 +187,7 @@ fn trade_timeline(trades: &[TradeEvent], dense: bool) -> View {
                         <span style="flex:1;" />
                         <span style="font-family:var(--font-mono);font-size:var(--text-xs);color:var(--text-muted);">{date_str}</span>
                     </div>
-                    <div style="display:flex;align-items:baseline;gap:var(--space-2);flex-wrap:wrap;margin-top:4px;">
+                    <div style="display:flex;align-items:baseline;gap:var(--space-2);flex-wrap:wrap;margin-top:var(--space-1);">
                         <span style="font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-body);">{price_str}</span>
                         <span style="font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-muted);">{"× "}{shares_str}</span>
                         <span style="flex:1;" />
@@ -249,7 +255,7 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
         let b_final  = fmt_money(b.final_value);
         let b_tone   = if b.metrics.total_return >= 0.0 { "gain" } else { "loss" };
         view! {
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:12px;">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:var(--space-3);">
                 <BdCard padding="16px".to_string()>
                     <BdStat label="Bench. value".to_string() value=b_final size="sm".to_string() />
                 </BdCard>
@@ -287,9 +293,9 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                               if has_trades { " minmax(300px,1fr)" } else { "" });
 
     view! {
-        <div style="display:flex;flex-direction:column;gap:16px;">
+        <div style="display:flex;flex-direction:column;gap:var(--space-4);">
             {bench_view}
-            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:12px;">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:var(--space-3);">
                 <BdCard padding="16px".to_string()>
                     <BdStat label="Final value".to_string() value=final_str size="sm".to_string() />
                 </BdCard>
@@ -337,7 +343,7 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                         <path d=line fill="none" stroke=color stroke-width="2.5"
                               stroke-linejoin="round" stroke-linecap="round" />
                     </svg>
-                    <div style="display:flex;gap:18px;margin-top:12px;font-size:12px;\
+                    <div style="display:flex;gap:18px;margin-top:var(--space-3);font-size:var(--text-xs);\
                                 color:var(--text-on-ink-muted);font-family:var(--font-mono);">
                         <span style="display:inline-flex;align-items:center;gap:7px;">
                             <span style=sw />"Strategy"
@@ -351,7 +357,7 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                     <div style="position:absolute;top:16px;right:16px;">
                         <BdBadge tone="neutral".to_string() soft=true>{trade_ticker}</BdBadge>
                     </div>
-                    <div style="max-height:318px;overflow-y:auto;margin:0 -4px;padding:2px 4px;">
+                    <div style="max-height:318px;overflow-y:auto;margin:0 -4px;padding:2px var(--space-1);">
                         {trades_view}
                     </div>
                 </BdCard>
@@ -360,18 +366,18 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
 
             {bag.then(|| view! {
                 <div style="display:flex;gap:14px;align-items:flex-start;padding:18px 20px;\
-                            background:var(--loss-200);border:3px solid var(--ink-900);\
+                            background:var(--loss-200);border:var(--border-bold) solid var(--ink-900);\
                             border-radius:var(--radius-lg);box-shadow:var(--shadow-hard);">
                     <span style="flex:none;width:44px;height:44px;border-radius:50%;\
-                                 background:var(--loss);border:2px solid var(--ink-900);\
+                                 background:var(--loss);border:var(--border-line) solid var(--ink-900);\
                                  display:flex;align-items:center;justify-content:center;\
-                                 font-size:22px;line-height:1;">"🛍"</span>
+                                 font-size:var(--text-title);line-height:1;">"🛍"</span>
                     <div>
                         <div style="font-family:var(--font-display);font-weight:800;font-size:19px;\
                                     letter-spacing:-0.01em;color:var(--loss-600);margin-bottom:3px;">
                             "Congratulations, you're a bagholder."
                         </div>
-                        <p style="margin:0;font-size:14px;line-height:1.5;color:var(--text-body);">
+                        <p style="margin:0;font-size:var(--text-sm);line-height:1.5;color:var(--text-body);">
                             "This position fell " {mdd_bag}
                             " with no stop loss. If you'd just held cash, you'd be about "
                             <strong>{format!("{opp_pct}% richer")}</strong>
@@ -422,7 +428,7 @@ fn equity_overlay(series: &[(String, BacktestResult)]) -> View {
         let sw   = format!("width:16px;height:3px;background:{color};border-radius:2px;");
         let from = entry.map(|d| format!("from {d}")).unwrap_or_default();
         view! {
-            <span style="display:inline-flex;align-items:center;gap:8px;\
+            <span style="display:inline-flex;align-items:center;gap:var(--space-2);\
                          font-family:var(--font-mono);font-size:13px;">
                 <span style=sw />
                 <span style="color:var(--paper-50);font-weight:700;">{name.clone()}</span>
@@ -452,7 +458,7 @@ fn equity_overlay(series: &[(String, BacktestResult)]) -> View {
                 <line x1=x1s x2=x2s y1=gy3.clone() y2=gy3 stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
                 {lines}
             </svg>
-            <div style="display:flex;flex-wrap:wrap;gap:16px;margin-top:14px;">{legend}</div>
+            <div style="display:flex;flex-wrap:wrap;gap:var(--space-4);margin-top:14px;">{legend}</div>
         </div>
     }.into_view()
 }
@@ -490,13 +496,13 @@ fn pe_chart(ticker: &str, h: &PeHistory, entry: Option<NaiveDate>) -> View {
     let hs = format!("{ch}");
     let lg = format!("P/E {pmin:.1}–{pmax:.1}");
     view! {
-        <div style="background:var(--teal-600);border:2px solid var(--ink-900);\
-                    border-radius:var(--radius-md);padding:12px 14px;">
+        <div style="background:var(--teal-600);border:var(--border-line) solid var(--ink-900);\
+                    border-radius:var(--radius-md);padding:var(--space-3) 14px;">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
                 <span style="font-family:var(--font-mono);font-weight:700;font-size:13px;color:var(--paper-50);">
                     {ticker.to_string()}
                 </span>
-                <span style="font-size:11px;color:var(--text-on-ink-muted);">{lg}</span>
+                <span style="font-size:var(--text-micro);color:var(--text-on-ink-muted);">{lg}</span>
             </div>
             <svg viewBox=vb width="100%" height=hs preserveAspectRatio="none" style="display:block;">
                 <path d=line fill="none" stroke="var(--ink-500)" stroke-width="2" stroke-linejoin="round" />
@@ -517,8 +523,8 @@ fn ConcernPanel(
     children: Children,
 ) -> impl IntoView {
     let inner = format!(
-        "display:flex;flex-direction:column;padding:16px;\
-         background:var(--surface-sunken);border:2px solid var(--ink-800);\
+        "display:flex;flex-direction:column;padding:var(--space-4);\
+         background:var(--surface-sunken);border:var(--border-line) solid var(--ink-800);\
          border-radius:var(--radius-md);min-height:104px;justify-content:center;{}",
         if disabled { "opacity:0.4;pointer-events:none;filter:saturate(0.5);" } else { "" }
     );
@@ -526,9 +532,9 @@ fn ConcernPanel(
         <div style="display:flex;flex-direction:column;gap:9px;">
             <div style="display:flex;flex-direction:column;gap:2px;padding-left:2px;">
                 <div style="display:flex;align-items:baseline;gap:7px;">
-                    <span style="font-family:var(--font-mono);font-weight:700;font-size:11px;\
+                    <span style="font-family:var(--font-mono);font-weight:700;font-size:var(--text-micro);\
                                  color:var(--accent);">{step}</span>
-                    <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;\
+                    <span style="font-weight:700;font-size:var(--text-micro);letter-spacing:0.1em;\
                                  text-transform:uppercase;color:var(--text-strong);">{title}</span>
                 </div>
                 {question.map(|q| view! {
@@ -550,10 +556,10 @@ fn field_heading(step: Option<&str>, title: &str, question: Option<&str>) -> Vie
         <div style="display:flex;flex-direction:column;gap:2px;padding-left:2px;">
             <div style="display:flex;align-items:baseline;gap:7px;">
                 {step.map(|s| view! {
-                    <span style="font-family:var(--font-mono);font-weight:700;font-size:11px;\
+                    <span style="font-family:var(--font-mono);font-weight:700;font-size:var(--text-micro);\
                                  color:var(--accent);">{s}</span>
                 })}
-                <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;\
+                <span style="font-weight:700;font-size:var(--text-micro);letter-spacing:0.1em;\
                              text-transform:uppercase;color:var(--text-strong);white-space:nowrap;">
                     {title}
                 </span>
@@ -722,35 +728,35 @@ fn App() -> impl IntoView {
                         opacity:0.22;filter:blur(2px);pointer-events:none;" />
             // Brand mark
             <header style="position:relative;z-index:2;display:flex;align-items:center;\
-                           padding:24px var(--gutter) 4px;max-width:1280px;width:100%;margin:0 auto;">
+                           padding:var(--space-5) var(--gutter) var(--space-1);max-width:1280px;width:100%;margin:0 auto;">
                 <img src="/assets/logo.png" alt="BagholderDeLorean"
                      style="height:72px;width:auto;display:block;" />
             </header>
             // Hero grid
             <div class="bd-hero-grid" style="position:relative;z-index:1;flex:1;display:grid;\
-                        gap:48px;align-items:center;max-width:1280px;width:100%;margin:0 auto;\
-                        padding:12px var(--gutter) 32px;">
+                        gap:var(--space-7);align-items:center;max-width:1280px;width:100%;margin:0 auto;\
+                        padding:var(--space-3) var(--gutter) var(--space-6);">
                 <div style="animation:bd-rise 0.55s var(--ease-out) both;">
-                    <span style="display:inline-flex;align-items:center;gap:8px;\
-                                 font-family:var(--font-mono);font-weight:700;font-size:11px;\
+                    <span style="display:inline-flex;align-items:center;gap:var(--space-2);\
+                                 font-family:var(--font-mono);font-weight:700;font-size:var(--text-micro);\
                                  letter-spacing:0.16em;text-transform:uppercase;color:var(--ink-800);\
-                                 background:var(--accent-soft);border:2px solid var(--ink-900);\
+                                 background:var(--accent-soft);border:var(--border-line) solid var(--ink-900);\
                                  border-radius:var(--radius-full);padding:6px 13px;\
-                                 box-shadow:var(--shadow-hard-sm);margin-bottom:24px;">
+                                 box-shadow:var(--shadow-hard-sm);margin-bottom:var(--space-5);">
                         "Backtesting · time machine"
                     </span>
                     <h1 style="font-family:var(--font-display);font-weight:800;\
-                                font-size:clamp(40px,6vw,60px);line-height:0.98;\
+                                font-size:clamp(var(--text-display-md),6vw,60px);line-height:0.98;\
                                 letter-spacing:-0.03em;margin:0 0 18px;color:var(--paper-50);">
                         "Backtest before you " <span style="color:var(--accent-soft);">"baghold."</span>
                     </h1>
-                    <p style="font-size:18px;line-height:1.55;color:var(--text-on-ink-muted);\
-                              max-width:440px;margin:0 0 4px;">
+                    <p style="font-size:var(--text-lg);line-height:1.55;color:var(--text-on-ink-muted);\
+                              max-width:440px;margin:0 0 var(--space-1);">
                         "Send a trading strategy back in time and find out whether you'd have \
                          gotten rich — or ended up holding the bag. Honest numbers, zero promises."
                     </p>
-                    <p style="font-family:var(--font-mono);font-size:12px;\
-                              color:var(--text-on-ink-muted);margin:24px 0 0;">
+                    <p style="font-family:var(--font-mono);font-size:var(--text-xs);\
+                              color:var(--text-on-ink-muted);margin:var(--space-5) 0 0;">
                         "Past performance is a vibe, not a promise."
                     </p>
                 </div>
@@ -763,18 +769,18 @@ fn App() -> impl IntoView {
                                     box-shadow:10px 12px 0 0 var(--ink-900);" />
                         <div style="position:absolute;left:-28px;bottom:34px;\
                                     animation:bd-chip 0.7s var(--ease-out) 0.25s both;\
-                                    background:var(--paper-50);border:3px solid var(--ink-900);\
-                                    border-radius:16px;box-shadow:5px 5px 0 0 var(--ink-900);\
+                                    background:var(--paper-50);border:var(--border-bold) solid var(--ink-900);\
+                                    border-radius:var(--radius-lg);box-shadow:5px 5px 0 0 var(--ink-900);\
                                     padding:14px 18px;">
                             <div style="font-family:var(--font-mono);font-weight:700;font-size:10.5px;\
                                         letter-spacing:0.12em;text-transform:uppercase;\
                                         color:var(--text-muted);">"Golden Cross · 2019→24"</div>
-                            <div style="display:flex;align-items:baseline;gap:10px;margin-top:4px;">
+                            <div style="display:flex;align-items:baseline;gap:10px;margin-top:var(--space-1);">
                                 <span style="font-family:var(--font-mono);font-weight:700;\
-                                             font-size:30px;color:var(--ink-900);">"+34.2%"</span>
-                                <span style="font-family:var(--font-body);font-weight:700;font-size:11px;\
+                                             font-size:var(--text-display-sm);color:var(--ink-900);">"+34.2%"</span>
+                                <span style="font-family:var(--font-body);font-weight:700;font-size:var(--text-micro);\
                                              color:var(--paper-50);background:var(--gain);\
-                                             border:2px solid var(--ink-900);border-radius:var(--radius-full);\
+                                             border:var(--border-line) solid var(--ink-900);border-radius:var(--radius-full);\
                                              padding:3px 9px;">"vs +11% SPY"</span>
                             </div>
                         </div>
@@ -786,17 +792,17 @@ fn App() -> impl IntoView {
                style="position:relative;z-index:2;align-self:center;margin-bottom:18px;\
                       display:inline-flex;flex-direction:column;align-items:center;gap:2px;\
                       color:var(--text-on-ink-muted);text-decoration:none;\
-                      font-family:var(--font-mono);font-size:11px;letter-spacing:0.1em;\
+                      font-family:var(--font-mono);font-size:var(--text-micro);letter-spacing:0.1em;\
                       text-transform:uppercase;">
                 "Run one yourself"
                 <span style="font-size:20px;line-height:1;animation:bd-bob 1.6s var(--ease-out) infinite;">"⌄"</span>
             </a>
         </section>
 
-        <main id="app" style="min-height:100vh;border-top:3px solid var(--ink-900);\
+        <main id="app" style="min-height:100vh;border-top:var(--border-bold) solid var(--ink-900);\
                               background:var(--surface-page);">
         <div style="max-width:1080px;margin:0 auto;padding:44px var(--gutter) 90px;\
-                    display:flex;flex-direction:column;gap:24px;">
+                    display:flex;flex-direction:column;gap:var(--space-5);">
 
             // Section intro
             <header style="display:flex;flex-direction:column;align-items:center;text-align:center;">
@@ -817,7 +823,7 @@ fn App() -> impl IntoView {
             })}
 
             <BdCard padding="22px".to_string()>
-            <section style="display:flex;flex-direction:column;gap:16px;">
+            <section style="display:flex;flex-direction:column;gap:var(--space-4);">
 
                 // ── Two concern panels ────────────────────────────────────────
                 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;">
@@ -837,7 +843,7 @@ fn App() -> impl IntoView {
                                     }.into_view()
                                 } else {
                                     view! {
-                                        <div style="display:flex;flex-direction:column;gap:12px;">
+                                        <div style="display:flex;flex-direction:column;gap:var(--space-3);">
                                             <BdTabs
                                                 items=vec![
                                                     TabItem { value:"ticker".into(), label:"Single ticker".into() },
@@ -881,7 +887,7 @@ fn App() -> impl IntoView {
                         view! {
                             <ConcernPanel step="02" title="Trade action"
                                 question="When do I get in & out?".to_string()>
-                                <div style="display:flex;flex-direction:column;gap:12px;">
+                                <div style="display:flex;flex-direction:column;gap:var(--space-3);">
                                     <BdSelect on_change=Box::new(move |v| {
                                         action.set(v); single_result.set(None);
                                     })>
@@ -902,10 +908,10 @@ fn App() -> impl IntoView {
                                             <option value="short_squeeze">"Short Squeeze  ·  meme"</option>
                                         </optgroup>
                                     </BdSelect>
-                                    <div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;">
+                                    <div style="display:flex;align-items:flex-start;gap:var(--space-2);flex-wrap:wrap;">
                                         {prst.then(|| view! { <BdBadge tone="accent".to_string()>"PRESET"</BdBadge> })}
                                         {meme.then(|| view! { <BdBadge tone="warn".to_string() soft=true>"MEME"</BdBadge> })}
-                                        <span style="font-size:12px;color:var(--text-muted);">
+                                        <span style="font-size:var(--text-xs);color:var(--text-muted);">
                                             {action_rationale(&a)}
                                         </span>
                                     </div>
@@ -922,11 +928,11 @@ fn App() -> impl IntoView {
                     show.then(|| view! {
                         <div style="display:flex;flex-direction:column;gap:9px;">
                             <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
-                                <span style="font-family:var(--font-mono);font-weight:700;font-size:11px;color:var(--accent);">"03"</span>
-                                <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"Parameters"</span>
+                                <span style="font-family:var(--font-mono);font-weight:700;font-size:var(--text-micro);color:var(--accent);">"03"</span>
+                                <span style="font-weight:700;font-size:var(--text-micro);letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"Parameters"</span>
                             </div>
-                            <div style="padding:16px;background:var(--surface-sunken);\
-                                        border:2px solid var(--ink-800);border-radius:var(--radius-md);">
+                            <div style="padding:var(--space-4);background:var(--surface-sunken);\
+                                        border:var(--border-line) solid var(--ink-800);border-radius:var(--radius-md);">
                                 {match a.as_str() {
                                     "sma" | "golden" => view! {
                                         <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
@@ -941,7 +947,7 @@ fn App() -> impl IntoView {
                                                     on_input=Box::new(move |v| slow.set(v.parse().unwrap_or(50))) />
                                             </div>
                                             {(a == "golden").then(|| view! {
-                                                <span style="font-size:12px;color:var(--text-muted);align-self:center;">
+                                                <span style="font-size:var(--text-xs);color:var(--text-muted);align-self:center;">
                                                     "Preset of SMA Crossover (50/200). Inputs ignored."
                                                 </span>
                                             })}
@@ -991,7 +997,7 @@ fn App() -> impl IntoView {
                                                 }
                                                 on_change=Box::new(move |v| realistic.set(v))
                                             />
-                                            <p style="margin:6px 0 0;font-size:12px;color:var(--text-muted);">
+                                            <p style="margin:6px 0 0;font-size:var(--text-xs);color:var(--text-muted);">
                                                 "Na\u{00ef}ve looks amazing. Realistic shows the edge already priced in."
                                             </p>
                                         </div>
@@ -1013,7 +1019,7 @@ fn App() -> impl IntoView {
                     let show_bm  = show_benchmark.get();
                     let lbl      = if is_busy { "Running\u{2026}" } else if prst { "Run preset" } else if scr { "Run screen" } else { "Run backtest" };
                     view! {
-                        <div style="display:flex;flex-direction:column;gap:16px;">
+                        <div style="display:flex;flex-direction:column;gap:var(--space-4);">
                             // Amount + Timeframe
                             <div style="display:grid;\
                                         grid-template-columns:repeat(auto-fit,minmax(220px,1fr));\
@@ -1091,7 +1097,7 @@ fn App() -> impl IntoView {
                                          border:4px solid var(--paper-300);border-top-color:var(--accent);\
                                          animation:bd-spin 0.8s linear infinite;margin-bottom:var(--space-4);" />
                             <p style="font-family:var(--font-display);font-weight:var(--weight-bold);\
-                                      font-size:var(--text-lg);color:var(--text-strong);margin:0 0 4px;">
+                                      font-size:var(--text-lg);color:var(--text-strong);margin:0 0 var(--space-1);">
                                 "Spinning up the flux capacitor\u{2026}"
                             </p>
                             <p style="font-size:var(--text-sm);color:var(--text-muted);margin:0;">
@@ -1167,7 +1173,7 @@ fn App() -> impl IntoView {
                                     <div style="overflow-x:auto;">
                                         <table style="border-collapse:collapse;width:100%;min-width:500px;">
                                             <thead>
-                                                <tr style="border-bottom:2px solid var(--border-soft);">
+                                                <tr style="border-bottom:var(--border-line) solid var(--border-soft);">
                                                     <th style="padding:0 6px 10px;width:34px;" />
                                                     <th class="bd-overline" style="padding:0 6px 10px;text-align:left;">"Ticker"</th>
                                                     <th class="bd-overline" style="padding:0 6px 10px;text-align:left;">"Industry"</th>
@@ -1180,7 +1186,7 @@ fn App() -> impl IntoView {
                                         </table>
                                     </div>
                                     <div style="display:flex;align-items:center;justify-content:space-between;\
-                                                gap:16px;margin-top:18px;flex-wrap:wrap;">
+                                                gap:var(--space-4);margin-top:18px;flex-wrap:wrap;">
                                         {if show_pe_tog {
                                             view! {
                                                 <BdSwitch checked=pe_entry.get()
@@ -1216,14 +1222,14 @@ fn App() -> impl IntoView {
                                             let ctr   = format!("Trough {} of {} (0 = most recent)", k + 1, n);
                                             return view! {
                                                 <div style="display:flex;align-items:center;\
-                                                            justify-content:center;gap:12px;">
+                                                            justify-content:center;gap:var(--space-3);">
                                                     <BdButton variant="dark".to_string() size="sm".to_string()
                                                         disabled=n_dis
                                                         on_click=Box::new(move || run_selected_k(pe_index.get().saturating_sub(1)))>
                                                         "\u{25c4} Newer"
                                                     </BdButton>
                                                     <span style="font-family:var(--font-mono);font-weight:700;\
-                                                                 font-size:14px;color:var(--text-strong);\
+                                                                 font-size:var(--text-sm);color:var(--text-strong);\
                                                                  min-width:170px;text-align:center;">{ctr}</span>
                                                     <BdButton variant="dark".to_string() size="sm".to_string()
                                                         disabled=o_dis
@@ -1261,13 +1267,13 @@ fn App() -> impl IntoView {
                                         .collect_view();
                                     view! {
                                         <div>
-                                            <p class="bd-overline" style="margin:0 0 12px;letter-spacing:var(--tracking-overline);">
+                                            <p class="bd-overline" style="margin:0 0 var(--space-3);letter-spacing:var(--tracking-overline);">
                                                 "P/E over time \u{2014} dots are troughs, red is your entry"
                                             </p>
                                             <div style="display:grid;\
                                                         grid-template-columns:repeat(auto-fill,minmax(200px,1fr));\
-                                                        gap:12px;">{charts}</div>
-                                            <p style="font-size:12px;color:var(--text-muted);margin:10px 0 0;text-align:center;">
+                                                        gap:var(--space-3);">{charts}</div>
+                                            <p style="font-size:var(--text-xs);color:var(--text-muted);margin:10px 0 0;text-align:center;">
                                                 "Step back to ask: what if I\u{2019}d bought the " <em>"previous"</em>
                                                 " time it looked this cheap?"
                                             </p>
@@ -1286,7 +1292,7 @@ fn App() -> impl IntoView {
                                          align-items:center;justify-content:center;font-size:var(--text-title);\
                                          margin-bottom:var(--space-3);">"\u{23EA}"</span>
                             <p style="font-family:var(--font-display);font-weight:var(--weight-bold);\
-                                      font-size:var(--text-lg);color:var(--text-strong);margin:0 0 4px;">
+                                      font-size:var(--text-lg);color:var(--text-strong);margin:0 0 var(--space-1);">
                                 "Define a strategy and run."
                             </p>
                             <p style="font-size:var(--text-sm);margin:0;">
@@ -1299,15 +1305,15 @@ fn App() -> impl IntoView {
         </div>
         </main>
 
-        <footer style="background:var(--teal-800);border-top:3px solid var(--ink-900);">
+        <footer style="background:var(--teal-800);border-top:var(--border-bold) solid var(--ink-900);">
             <div style="max-width:860px;margin:0 auto;padding:18px var(--gutter);\
                         display:flex;align-items:center;justify-content:space-between;\
-                        gap:16px;flex-wrap:wrap;">
-                <span style="font-family:var(--font-mono);font-size:12px;\
+                        gap:var(--space-4);flex-wrap:wrap;">
+                <span style="font-family:var(--font-mono);font-size:var(--text-xs);\
                               letter-spacing:0.08em;color:var(--text-on-ink-muted);">
                     "© 1985–2025 BagholderDeLorean"
                 </span>
-                <span style="font-family:var(--font-mono);font-size:11px;\
+                <span style="font-family:var(--font-mono);font-size:var(--text-micro);\
                               color:var(--text-on-ink-muted);">
                     "Past performance is a vibe, not a promise."
                 </span>
