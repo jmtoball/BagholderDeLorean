@@ -2,8 +2,9 @@
 //! SQL, fast range scans for backtests. OHLCV is a wide table; fundamentals is
 //! tall (`ticker, period, metric, value`) so the metric set stays open-ended.
 
-use crate::{download_cik_map, download_congress_trades, download_corporate_actions, download_cramer_calls, download_fred_series, download_fundamentals, download_ohlcv};
+use crate::{download_cik_map, download_congress_trades, download_corporate_actions, download_cramer_calls, download_fred_series, download_fundamentals, download_ohlcv, download_short_interest};
 use crate::cramer::CramerCall;
+use crate::finra::ShortInterest;
 use anyhow::{Context, Result};
 use bagholder_core::{Bar, CaKind, CongressTrade, CorporateAction, Fundamental};
 use chrono::NaiveDate;
@@ -63,6 +64,15 @@ CREATE TABLE IF NOT EXISTS cramer_calls (
 );
 -- Any row here means the full dataset has been loaded.
 CREATE TABLE IF NOT EXISTS cramer_fetched (sentinel INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS short_interest (
+  ticker          TEXT NOT NULL,
+  settlement_date DATE NOT NULL,
+  short_qty       BIGINT NOT NULL,
+  days_to_cover   DOUBLE NOT NULL,
+  PRIMARY KEY (ticker, settlement_date)
+);
+-- Per-ticker sentinel; full history fetched once and cached.
+CREATE TABLE IF NOT EXISTS short_interest_fetched (ticker TEXT PRIMARY KEY);
 ";
 
 /// Strip Stooq's exchange suffix and upper-case, so "AAPL.US" -> "AAPL" and
@@ -388,6 +398,50 @@ impl Store {
                 .prepare("INSERT OR IGNORE INTO cramer_calls VALUES (?, ?, ?)")?;
             for c in calls {
                 stmt.execute(params![c.ticker, c.date, c.call])?;
+            }
+        }
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
+    /// FINRA biweekly short interest for a ticker; fetched once and cached.
+    pub fn short_interest(&self, ticker: &str) -> Result<Vec<ShortInterest>> {
+        let fetched: i64 = self.conn.query_row(
+            "SELECT count(*) FROM short_interest_fetched WHERE ticker = ?",
+            [ticker], |r| r.get(0),
+        )?;
+        if fetched == 0 {
+            let records = download_short_interest(ticker)?;
+            self.write_short_interest(&records)?;
+            self.conn.execute(
+                "INSERT OR IGNORE INTO short_interest_fetched VALUES (?)", [ticker],
+            )?;
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT ticker, settlement_date, short_qty, days_to_cover \
+             FROM short_interest WHERE ticker = ? ORDER BY settlement_date",
+        )?;
+        let rows = stmt
+            .query_map([ticker], |r| {
+                Ok(ShortInterest {
+                    ticker: r.get(0)?,
+                    settlement_date: r.get(1)?,
+                    short_qty: r.get(2)?,
+                    days_to_cover: r.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn write_short_interest(&self, records: &[ShortInterest]) -> Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        {
+            let mut stmt = self.conn.prepare(
+                "INSERT OR IGNORE INTO short_interest VALUES (?, ?, ?, ?)",
+            )?;
+            for r in records {
+                stmt.execute(params![r.ticker, r.settlement_date, r.short_qty, r.days_to_cover])?;
             }
         }
         self.conn.execute_batch("COMMIT")?;
