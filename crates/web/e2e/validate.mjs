@@ -106,6 +106,12 @@ await step('Buy & Hold (AAPL, 10y)', async () => {
   await waitForResult(30000);
   const pct = (await page.locator('body').innerText()).match(/[+−]\d[\d,.]+%/)?.[0] ?? '?';
   ok(`result rendered — total return: ${pct}`);
+  // G1: all six metrics surfaced (labels uppercased via text-transform).
+  const body = (await page.locator('body').innerText()).toUpperCase();
+  for (const label of ['SORTINO', 'RECOVERY FACTOR']) {
+    if (!body.includes(label)) fail(`results missing "${label}" metric`);
+    else ok(`results show "${label}"`);
+  }
   await shot('02-buyhold');
 });
 
