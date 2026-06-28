@@ -6,7 +6,7 @@ pub mod components;
 
 use std::collections::{HashMap, HashSet};
 
-use bagholder_core::{BacktestResult, Candidate, PeHistory};
+use bagholder_core::{BacktestResult, Candidate, PeHistory, TradeEvent};
 use chrono::{Datelike, NaiveDate};
 use leptos::*;
 use serde::de::DeserializeOwned;
@@ -127,6 +127,71 @@ fn to_pts(result: &BacktestResult) -> Option<Vec<(f64, f64)>> {
 }
 
 /// SVG equity curve with area gradient fill for a single result.
+fn trade_timeline(trades: &[TradeEvent], dense: bool) -> View {
+    if trades.is_empty() {
+        return view! {
+            <div style="text-align:center;padding:32px 16px;color:var(--text-muted);font-size:var(--text-sm);font-family:var(--font-mono);">
+                "No trades executed. Bold of you."
+            </div>
+        }.into_view();
+    }
+    let row_gap = if dense { "var(--space-3)" } else { "var(--space-5)" };
+    let marker = if dense { 30u32 } else { 36u32 };
+    let marker_s = marker.to_string();
+    let rows: Vec<_> = trades.iter().enumerate().map(|(i, t)| {
+        let is_buy   = t.action == "buy";
+        let is_first = i == 0;
+        let is_last  = i == trades.len() - 1;
+        let tone_color = if is_buy { "var(--gain)" } else { "var(--loss)" };
+        let tone_soft  = if is_buy { "var(--gain-200)" } else { "var(--loss-200)" };
+        let arrow      = if is_buy { "↑" } else { "↓" };
+        let badge_label= if is_buy { "Buy" } else { "Sell" };
+        let date_str   = format!("{}", t.date.format("%b %-d, %Y"));
+        let price_str  = format!("${:.2}", t.price);
+        let shares_str = format!("{:.1} sh", t.shares);
+        let total_str  = format!("${:.2}", t.price * t.shares);
+        let spine_top  = if is_first { format!("{}px", marker / 2) } else { "0".to_string() };
+        let spine_bot  = if is_last  { format!("{}px", marker / 2) } else { "0".to_string() };
+        let font_size  = if dense { "var(--text-sm)" } else { "var(--text-base)" };
+        let row_pb     = if is_last { "0".to_string() } else { row_gap.to_string() };
+        let marker_ss  = marker_s.clone();
+        let col_style  = format!("position:relative;width:{marker_ss}px;flex:0 0 {marker_ss}px;display:flex;justify-content:center;");
+        let spine_style= format!("position:absolute;top:{spine_top};bottom:{spine_bot};left:50%;width:2px;margin-left:-1px;background:var(--border-soft);");
+        let dot_style  = format!("position:relative;z-index:1;width:{marker_ss}px;height:{marker_ss}px;flex:0 0 auto;border-radius:var(--radius-full);background:{tone_soft};border:var(--border-line) solid var(--ink-900);box-shadow:var(--shadow-hard-sm);display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-weight:var(--weight-bold);font-size:17px;color:var(--ink-900);");
+        let body_style = format!("flex:1;min-width:0;padding-bottom:{row_pb};padding-top:4px;");
+        let tick_style = format!("font-family:var(--font-mono);font-weight:var(--weight-bold);font-size:{font_size};letter-spacing:0.01em;color:var(--text-strong);");
+        let pill_style = format!("display:inline-flex;align-items:center;line-height:1;font-family:var(--font-body);font-weight:var(--weight-bold);font-size:var(--text-micro);letter-spacing:var(--tracking-overline);text-transform:uppercase;color:var(--paper-50);background:{tone_color};border:var(--border-hair) solid var(--ink-900);border-radius:var(--radius-full);padding:3px 8px;");
+        view! {
+            <li style="display:flex;align-items:stretch;gap:var(--space-3);">
+                <div style=col_style>
+                    <span style=spine_style />
+                    <span style=dot_style>{arrow}</span>
+                </div>
+                <div style=body_style>
+                    <div style="display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap;">
+                        <span style=tick_style>{t.ticker.clone()}</span>
+                        <span style=pill_style>{badge_label}</span>
+                        <span style="flex:1;" />
+                        <span style="font-family:var(--font-mono);font-size:var(--text-xs);color:var(--text-muted);">{date_str}</span>
+                    </div>
+                    <div style="display:flex;align-items:baseline;gap:var(--space-2);flex-wrap:wrap;margin-top:4px;">
+                        <span style="font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-body);">{price_str}</span>
+                        <span style="font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-muted);">{"× "}{shares_str}</span>
+                        <span style="flex:1;" />
+                        <span style="font-family:var(--font-mono);font-weight:var(--weight-bold);font-size:var(--text-sm);color:var(--text-strong);">{total_str}</span>
+                    </div>
+                </div>
+            </li>
+        }
+    }).collect();
+
+    view! {
+        <ol style="list-style:none;margin:0;padding:0;">
+            {rows}
+        </ol>
+    }.into_view()
+}
+
 fn equity_single(r: &BacktestResult, label: &str) -> View {
     let Some(pts) = to_pts(r) else {
         return view! { <p style="color:var(--text-on-ink-muted);">"Not enough data."</p> }.into_view();
@@ -162,6 +227,16 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     let hs   = format!("{H}");
     let sw   = format!("width:16px;height:3px;background:{color};border-radius:2px;");
 
+    let has_trades = r.trades.len() > 1;
+    let trade_count = r.trades.len();
+    let trade_title = format!("{} {}", trade_count, if trade_count == 1 { "fill" } else { "fills" });
+    let trade_ticker = r.trades.first().map(|t| t.ticker.clone()).unwrap_or_default();
+    let trades_dense = trade_count > 5;
+    let trades_view = if has_trades { trade_timeline(&r.trades, trades_dense) } else { view! {}.into_view() };
+    let equity_col  = if has_trades { "minmax(0,1.65fr)" } else { "1fr" };
+    let row_style   = format!("display:grid;grid-template-columns:{equity_col}{};gap:18px;align-items:start;",
+                              if has_trades { " minmax(300px,1fr)" } else { "" });
+
     view! {
         <div style="display:flex;flex-direction:column;gap:16px;">
             <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;">
@@ -182,6 +257,7 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                 </BdCard>
             </div>
 
+            <div style=row_style>
             <BdCard tone="dark".to_string() overline=card_ol title=card_title>
                 <div style="position:absolute;top:16px;right:16px;">
                     <BdBadge tone=badge_tone.to_string()>{total_ret}</BdBadge>
@@ -213,6 +289,18 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                     </div>
                 </div>
             </BdCard>
+
+            {has_trades.then(|| view! {
+                <BdCard overline="Executed trades".to_string() title=trade_title>
+                    <div style="position:absolute;top:16px;right:16px;">
+                        <BdBadge tone="neutral".to_string() soft=true>{trade_ticker}</BdBadge>
+                    </div>
+                    <div style="max-height:318px;overflow-y:auto;margin:0 -4px;padding:2px 4px;">
+                        {trades_view}
+                    </div>
+                </BdCard>
+            })}
+            </div>
 
             {bag.then(|| view! {
                 <div style="display:flex;gap:14px;align-items:flex-start;padding:18px 20px;\

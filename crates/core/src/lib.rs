@@ -880,7 +880,7 @@ pub fn run_multi_asset_backtest(
             None => return BacktestResult {
                 curve: vec![],
                 metrics: compute_metrics(&[], &[]),
-                positions: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
+                positions: vec![], trades: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
                 initial_amount: 10_000.0, final_value: 0.0,
             },
         };
@@ -928,7 +928,7 @@ pub fn run_multi_asset_backtest(
     let rets: Vec<f64> = curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect();
     let metrics = compute_metrics(&curve, &rets);
     // ponytail: positions left empty for multi-asset; add per-ticker summary when UI needs it.
-    BacktestResult { curve, metrics, positions: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
+    BacktestResult { curve, metrics, positions: vec![], trades: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
         initial_amount: 10_000.0, final_value: 0.0, }
 }
 
@@ -979,6 +979,17 @@ pub struct EquityPoint {
     pub equity: f64,
 }
 
+/// A single simulated trade event (entry or exit).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TradeEvent {
+    pub date: NaiveDate,
+    pub ticker: String,
+    /// "buy" or "sell"
+    pub action: String,
+    pub price: f64,
+    pub shares: f64,
+}
+
 /// Per-position breakdown included in a portfolio-level backtest result.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PositionSummary {
@@ -995,6 +1006,9 @@ pub struct BacktestResult {
     /// Per-position breakdown; empty for legacy `run_backtest` results.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub positions: Vec<PositionSummary>,
+    /// Trade log: buy/sell events as signals transition. Empty for multi-asset presets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trades: Vec<TradeEvent>,
     /// Set when the run entered at a P/E-minimum: the chosen entry date and the
     /// P/E there. `None` for ordinary runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1051,6 +1065,7 @@ pub fn run_backtest(bars: &[Bar], strategy: &Strategy) -> BacktestResult {
         curve,
         metrics,
         positions: vec![],
+        trades: vec![],
         entry_date: None,
         entry_pe: None,
         entry_index: None,
@@ -1078,6 +1093,7 @@ pub fn run_portfolio_backtest(
     let mut gen = strategy.clone().into_generator();
     let mut portfolio = Portfolio::new(initial_cash);
     let mut curve = Vec::with_capacity(bars.len());
+    let mut trades: Vec<TradeEvent> = Vec::new();
 
     for (i, bar) in bars.iter().enumerate() {
         // Overnight accruals from the previous bar's end-of-day state.
@@ -1105,6 +1121,7 @@ pub fn run_portfolio_backtest(
         // Signal uses only data through this bar; fills at close, earns next bar's return.
         let weight = gen.next(bar);
         let adv = rolling_adv(bars, i, 20);
+        let shares_before = portfolio.shares(ticker);
         portfolio.execute(
             &Order::TargetWeight { ticker: ticker.to_owned(), weight },
             bar.close,
@@ -1112,6 +1129,17 @@ pub fn run_portfolio_backtest(
             costs,
             adv,
         );
+        let shares_after = portfolio.shares(ticker);
+        let delta = shares_after - shares_before;
+        if delta.abs() > 1e-9 {
+            trades.push(TradeEvent {
+                date: bar.date,
+                ticker: ticker.to_string(),
+                action: if delta > 0.0 { "buy".to_string() } else { "sell".to_string() },
+                price: bar.close,
+                shares: delta.abs(),
+            });
+        }
     }
 
     let rets: Vec<f64> = curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect();
@@ -1131,7 +1159,7 @@ pub fn run_portfolio_backtest(
         unrealized_pnl: unrealized,
     }];
 
-    BacktestResult { curve, metrics, positions, entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
+    BacktestResult { curve, metrics, positions, trades, entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
         initial_amount: 10_000.0, final_value: 0.0, }
 }
 
@@ -1241,11 +1269,14 @@ pub fn congress_signals(bars: &[Bar], disclosures: &[(NaiveDate, f64)]) -> Vec<f
 
 /// Run a backtest from a pre-computed signal vector (same length as `bars`).
 /// `signals[i]` = position weight applied to bar `i+1`'s return.
-pub fn run_signals_backtest(bars: &[Bar], signals: &[f64]) -> BacktestResult {
+/// Emits a TradeEvent whenever the signal transitions between 0 and non-zero.
+pub fn run_signals_backtest(ticker: &str, bars: &[Bar], signals: &[f64]) -> BacktestResult {
     let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
     let mut equity = 1.0f64;
     let mut curve = Vec::with_capacity(bars.len());
     let mut rets: Vec<f64> = Vec::with_capacity(bars.len().saturating_sub(1));
+    let mut trades: Vec<TradeEvent> = Vec::new();
+    let mut prev_sig = 0.0f64;
     for i in 0..bars.len() {
         if i > 0 {
             let pct = closes[i] / closes[i - 1] - 1.0;
@@ -1253,6 +1284,13 @@ pub fn run_signals_backtest(bars: &[Bar], signals: &[f64]) -> BacktestResult {
             equity *= 1.0 + r;
             rets.push(r);
         }
+        let sig = signals.get(i).copied().unwrap_or(0.0);
+        if prev_sig == 0.0 && sig != 0.0 {
+            trades.push(TradeEvent { date: bars[i].date, ticker: ticker.to_string(), action: "buy".to_string(), price: closes[i], shares: 1.0 });
+        } else if prev_sig != 0.0 && sig == 0.0 {
+            trades.push(TradeEvent { date: bars[i].date, ticker: ticker.to_string(), action: "sell".to_string(), price: closes[i], shares: 1.0 });
+        }
+        prev_sig = sig;
         curve.push(EquityPoint { date: bars[i].date, equity });
     }
     let metrics = compute_metrics(&curve, &rets);
@@ -1260,6 +1298,7 @@ pub fn run_signals_backtest(bars: &[Bar], signals: &[f64]) -> BacktestResult {
         curve,
         metrics,
         positions: vec![],
+        trades,
         entry_date: None,
         entry_pe: None,
         entry_index: None,
@@ -1272,8 +1311,8 @@ pub fn run_signals_backtest(bars: &[Bar], signals: &[f64]) -> BacktestResult {
 /// Run a single-ticker backtest driven by pre-computed event signals.
 /// `events` = `(execution_date, target_weight)` — works for congressional trades,
 /// Cramer call fades, or any dated event-signal source.
-pub fn run_event_backtest(bars: &[Bar], events: &[(NaiveDate, f64)]) -> BacktestResult {
-    run_signals_backtest(bars, &congress_signals(bars, events))
+pub fn run_event_backtest(ticker: &str, bars: &[Bar], events: &[(NaiveDate, f64)]) -> BacktestResult {
+    run_signals_backtest(ticker, bars, &congress_signals(bars, events))
 }
 
 /// Entry when days-to-cover exceeds `dtc_min` AND price is above its `window`-day SMA.
@@ -1908,6 +1947,23 @@ mod tests {
         let sig_late = squeeze_signals(&bars, &si_late, 5.0, window);
         assert_eq!(sig_late[14], 0.0, "SI not yet reported");
         assert_eq!(sig_late[15], 1.0, "SI reported + above SMA → enter");
+    }
+
+    #[test]
+    fn trade_log_captures_signal_transitions() {
+        let base = NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+        let bars: Vec<Bar> = (0..6).map(|i| Bar {
+            date: base + chrono::Duration::days(i),
+            open: 100.0, high: 100.0, low: 100.0, close: 100.0, volume: 1_000.0,
+        }).collect();
+        // signal: out, in, in, out, in — expect buy@1, sell@3, buy@4
+        let signals = vec![0.0, 1.0, 1.0, 0.0, 1.0, 1.0];
+        let r = run_signals_backtest("AAPL", &bars, &signals);
+        assert_eq!(r.trades.len(), 3);
+        assert_eq!(r.trades[0].action, "buy");
+        assert_eq!(r.trades[1].action, "sell");
+        assert_eq!(r.trades[2].action, "buy");
+        assert_eq!(r.trades[0].ticker, "AAPL");
     }
 
     #[test]

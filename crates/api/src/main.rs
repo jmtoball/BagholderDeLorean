@@ -123,7 +123,7 @@ async fn backtest(
         events.sort_by_key(|(d, _)| *d);
         let bars = trim_years(bars, q.years);
         let amount = q.initial_amount.unwrap_or(10_000.0);
-        return Ok(Json(run_event_backtest(&bars, &events).with_amount(amount)));
+        return Ok(Json(run_event_backtest(&q.ticker, &bars, &events).with_amount(amount)));
     }
 
     // Short squeeze: high days-to-cover + upward momentum entry.
@@ -147,7 +147,7 @@ async fn backtest(
         let bars = trim_years(bars, q.years);
         let sigs = squeeze_signals(&bars, &si_events, 5.0, 20);
         let amount = q.initial_amount.unwrap_or(10_000.0);
-        return Ok(Json(run_signals_backtest(&bars, &sigs).with_amount(amount)));
+        return Ok(Json(run_signals_backtest(&q.ticker, &bars, &sigs).with_amount(amount)));
     }
 
     // Congress copy-trade: separate path — uses external disclosure signals.
@@ -168,7 +168,7 @@ async fn backtest(
         let disclosures = congress_disclosures(&trades, &q.ticker, use_filing);
         let bars = trim_years(bars, q.years);
         let amount = q.initial_amount.unwrap_or(10_000.0);
-        return Ok(Json(run_event_backtest(&bars, &disclosures).with_amount(amount)));
+        return Ok(Json(run_event_backtest(&q.ticker, &bars, &disclosures).with_amount(amount)));
     }
 
     let strategy = match q.strategy.as_str() {
