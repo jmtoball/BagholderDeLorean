@@ -73,6 +73,12 @@ CREATE TABLE IF NOT EXISTS short_interest (
 );
 -- Per-ticker sentinel; full history fetched once and cached.
 CREATE TABLE IF NOT EXISTS short_interest_fetched (ticker TEXT PRIMARY KEY);
+-- Yahoo instrument type per ticker ('EQUITY' / 'ETF' / 'MUTUALFUND' / …); rides
+-- the ohlcv fetch. Absent row = unknown; callers treat unknown as 'not a fund'.
+CREATE TABLE IF NOT EXISTS ticker_meta (
+  ticker          TEXT PRIMARY KEY,
+  instrument_type TEXT
+);
 ";
 
 /// Strip Stooq's exchange suffix and upper-case, so "AAPL.US" -> "AAPL" and
@@ -119,9 +125,43 @@ impl Store {
         if !cached.is_empty() {
             return Ok(cached);
         }
-        let bars = download_ohlcv(ticker)?;
+        let (bars, instrument_type) = download_ohlcv(ticker)?;
         self.write_bars(ticker, &bars)?;
+        self.write_meta(ticker, instrument_type.as_deref())?;
         Ok(bars)
+    }
+
+    /// Yahoo instrument type for `ticker` ("EQUITY"/"ETF"/"MUTUALFUND"/…), or
+    /// `None` when unknown. Serves the cache; on a miss it rides the ohlcv fetch
+    /// (a no-op download when bars are already cached), then re-reads. `None` is
+    /// a valid answer — callers must treat unknown as "not a fund", not an error.
+    pub fn instrument_type(&self, ticker: &str) -> Result<Option<String>> {
+        if let Some(t) = self.read_meta(ticker)? {
+            return Ok(Some(t));
+        }
+        self.ohlcv(ticker)?;
+        self.read_meta(ticker)
+    }
+
+    fn write_meta(&self, ticker: &str, instrument_type: Option<&str>) -> Result<()> {
+        if let Some(t) = instrument_type {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO ticker_meta VALUES (?, ?)",
+                params![ticker, t],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn read_meta(&self, ticker: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT instrument_type FROM ticker_meta WHERE ticker = ?")?;
+        let mut rows = stmt.query([ticker])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get::<_, Option<String>>(0)?),
+            None => Ok(None),
+        }
     }
 
     fn read_bars(&self, ticker: &str) -> Result<Vec<Bar>> {
@@ -508,6 +548,20 @@ mod tests {
         s.write_bars("AAPL.US", &bars).unwrap();
         s.write_bars("AAPL.US", &bars).unwrap();
         assert_eq!(s.read_bars("AAPL.US").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn instrument_type_serves_cached_meta_else_none() {
+        let s = Store::in_memory().unwrap();
+        // Simulate what ohlcv persists after a download.
+        s.write_bars("VOO", &[bar("2020-01-02", 300.0)]).unwrap();
+        s.write_meta("VOO", Some("ETF")).unwrap();
+        assert_eq!(s.instrument_type("VOO").unwrap(), Some("ETF".to_string()));
+
+        // Bars cached but no meta row (older cache / sparse symbol): instrument_type
+        // re-rides ohlcv (a no-op since bars exist), stays None — never errors.
+        s.write_bars("PLAIN", &[bar("2020-01-02", 50.0)]).unwrap();
+        assert_eq!(s.instrument_type("PLAIN").unwrap(), None);
     }
 
     #[test]

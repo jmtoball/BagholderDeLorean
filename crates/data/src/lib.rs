@@ -34,7 +34,9 @@ fn no_data_msg(symbol: &str) -> String {
     format!("Couldn't load data for \"{symbol}\" \u{2014} it may be an unknown or delisted ticker.")
 }
 
-pub fn download_ohlcv(symbol: &str) -> Result<Vec<Bar>> {
+/// Returns the daily bars plus Yahoo's `meta.instrumentType` ("EQUITY", "ETF",
+/// "MUTUALFUND", …) when present — it rides the same chart fetch, no extra call.
+pub fn download_ohlcv(symbol: &str) -> Result<(Vec<Bar>, Option<String>)> {
     // Explicit period1/period2 over `range=max`: the latter makes Yahoo silently
     // downsample to monthly bars. period1=0 (epoch) pulls full daily history.
     let url = format!(
@@ -62,7 +64,7 @@ pub fn download_ohlcv(symbol: &str) -> Result<Vec<Bar>> {
     parse_yahoo_chart(symbol, &body)
 }
 
-fn parse_yahoo_chart(symbol: &str, body: &str) -> Result<Vec<Bar>> {
+fn parse_yahoo_chart(symbol: &str, body: &str) -> Result<(Vec<Bar>, Option<String>)> {
     #[derive(Deserialize)]
     struct Resp {
         chart: Chart,
@@ -76,6 +78,14 @@ fn parse_yahoo_chart(symbol: &str, body: &str) -> Result<Vec<Bar>> {
     struct ChartResult {
         timestamp: Option<Vec<i64>>,
         indicators: Indicators,
+        // Yahoo's meta block — we keep only the instrument type; the rest is discarded.
+        #[serde(default)]
+        meta: Meta,
+    }
+    #[derive(Deserialize, Default)]
+    struct Meta {
+        #[serde(rename = "instrumentType")]
+        instrument_type: Option<String>,
     }
     #[derive(Deserialize)]
     struct Indicators {
@@ -105,6 +115,7 @@ fn parse_yahoo_chart(symbol: &str, body: &str) -> Result<Vec<Bar>> {
         .result
         .and_then(|mut rs| rs.pop())
         .ok_or_else(|| anyhow::anyhow!("{}", no_data_msg(symbol)))?;
+    let instrument_type = result.meta.instrument_type.clone();
     let ts = result.timestamp.unwrap_or_default();
     let q = result
         .indicators
@@ -145,7 +156,7 @@ fn parse_yahoo_chart(symbol: &str, body: &str) -> Result<Vec<Bar>> {
     if bars.is_empty() {
         anyhow::bail!("yahoo returned no usable bars");
     }
-    Ok(bars)
+    Ok((bars, instrument_type))
 }
 
 // --- Corporate actions (splits + dividends) ----------------------------------
@@ -434,10 +445,33 @@ mod tests {
                       "low":[6.9,7.0,7.1],"close":[7.1,7.25,null],"volume":[100,120,130]}],
             "adjclose":[{"adjclose":[6.5,6.6,null]}]
           }}]}}"#;
-        let bars = parse_yahoo_chart("AAPL", json).unwrap();
+        let (bars, _) = parse_yahoo_chart("AAPL", json).unwrap();
         assert_eq!(bars.len(), 2);
         assert_eq!(bars[0].date, "2020-01-02".parse::<NaiveDate>().unwrap());
         assert_eq!(bars[1].close, 6.6); // adjusted close, not raw 7.25
+    }
+
+    #[test]
+    fn parses_instrument_type_from_meta_when_present() {
+        let with_meta = r#"{"chart":{"error":null,"result":[{
+          "meta":{"instrumentType":"ETF"},
+          "timestamp":[1577923200],
+          "indicators":{
+            "quote":[{"open":[7.0],"high":[7.2],"low":[6.9],"close":[7.1],"volume":[100]}],
+            "adjclose":[{"adjclose":[6.5]}]
+          }}]}}"#;
+        let (_, it) = parse_yahoo_chart("VOO", with_meta).unwrap();
+        assert_eq!(it, Some("ETF".to_string()));
+
+        // Same payload, no meta block -> None (older cache rows / sparse symbols).
+        let no_meta = r#"{"chart":{"error":null,"result":[{
+          "timestamp":[1577923200],
+          "indicators":{
+            "quote":[{"open":[7.0],"high":[7.2],"low":[6.9],"close":[7.1],"volume":[100]}],
+            "adjclose":[{"adjclose":[6.5]}]
+          }}]}}"#;
+        let (_, it) = parse_yahoo_chart("AAPL", no_meta).unwrap();
+        assert_eq!(it, None);
     }
 
 
