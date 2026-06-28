@@ -59,18 +59,6 @@ pub struct CorporateAction {
     pub kind: CaKind,
 }
 
-/// A single intraday (minute-resolution) OHLCV bar from Polygon.io.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MinuteBar {
-    /// Bar open time in UTC (naive — Polygon returns UTC millis).
-    pub ts: chrono::NaiveDateTime,
-    pub open: f64,
-    pub high: f64,
-    pub low: f64,
-    pub close: f64,
-    pub volume: f64,
-}
-
 /// One disclosed congressional stock transaction (STOCK Act PTR).
 /// Both dates are kept: transaction_date (when the trade occurred) and
 /// filing_date (when publicly disclosed — typically 30–45 days later).
