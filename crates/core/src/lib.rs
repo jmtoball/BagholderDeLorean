@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 fn deser_f64_or_zero<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
     Option::<f64>::deserialize(d).map(|o| o.unwrap_or(0.0))
 }
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Bar {
@@ -193,7 +193,7 @@ impl Portfolio {
                 .sum::<f64>()
     }
 
-    /// Rebalance to `alloc` target weights using total portfolio equity.
+    /// Rebalance every name in `alloc` to its target weight using total equity.
     /// Tickers absent from `prices` or with zero price are skipped.
     /// ponytail: ADV per ticker not tracked → market impact = 0; add a
     /// ticker→adv map when impact needs to be modelled for multi-asset.
@@ -204,8 +204,37 @@ impl Portfolio {
         date: NaiveDate,
         costs: &FillCosts,
     ) {
+        self.rebalance_inner(alloc, prices, date, costs, None);
+    }
+
+    /// Partial rebalance: reset only `only` to their target weights (using total
+    /// equity); every other position keeps its shares. Pairs with `RebalanceConfig`
+    /// `full = false` and the `drifted_tickers` set.
+    pub fn rebalance_drifted(
+        &mut self,
+        alloc: &Allocation,
+        prices: &HashMap<String, f64>,
+        date: NaiveDate,
+        costs: &FillCosts,
+        only: &HashSet<String>,
+    ) {
+        self.rebalance_inner(alloc, prices, date, costs, Some(only));
+    }
+
+    /// Shared rebalance loop. `only = Some(set)` restricts trading to those tickers.
+    fn rebalance_inner(
+        &mut self,
+        alloc: &Allocation,
+        prices: &HashMap<String, f64>,
+        date: NaiveDate,
+        costs: &FillCosts,
+        only: Option<&HashSet<String>>,
+    ) {
         let equity = self.equity(prices);
         for (ticker, &weight) in &alloc.0 {
+            if only.is_some_and(|set| !set.contains(ticker)) {
+                continue;
+            }
             let price = match prices.get(ticker.as_str()) {
                 Some(&p) if p > 0.0 => p,
                 _ => continue,
@@ -317,6 +346,30 @@ pub struct RebalanceConfig {
     pub full: bool,
 }
 
+/// Tickers whose actual weight has drifted beyond `bands` from their target.
+/// Empty when `bands` is `None` or equity is non-positive. This is the set a
+/// partial (`full = false`) rebalance resets — see `Portfolio::rebalance_drifted`.
+pub fn drifted_tickers(
+    portfolio: &Portfolio,
+    alloc: &Allocation,
+    prices: &HashMap<String, f64>,
+    bands: Option<&BandConfig>,
+) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let Some(bands) = bands else { return out; };
+    let equity = portfolio.equity(prices);
+    if equity <= 0.0 { return out; }
+    for (ticker, &target) in &alloc.0 {
+        let price = prices.get(ticker.as_str()).copied().unwrap_or(0.0);
+        let actual = portfolio.shares(ticker) * price / equity;
+        let drift = (actual - target).abs();
+        if drift > bands.absolute || (target > 0.0 && drift / target > bands.relative) {
+            out.insert(ticker.clone());
+        }
+    }
+    out
+}
+
 /// Returns true when the portfolio needs to be rebalanced according to `config`.
 pub fn needs_rebalance(
     portfolio: &Portfolio,
@@ -331,19 +384,7 @@ pub fn needs_rebalance(
             return true;
         }
     }
-    if let Some(ref bands) = config.bands {
-        let equity = portfolio.equity(prices);
-        if equity <= 0.0 { return false; }
-        for (ticker, &target) in &alloc.0 {
-            let price = prices.get(ticker.as_str()).copied().unwrap_or(0.0);
-            let actual = portfolio.shares(ticker) * price / equity;
-            let drift = (actual - target).abs();
-            if drift > bands.absolute || (target > 0.0 && drift / target > bands.relative) {
-                return true;
-            }
-        }
-    }
-    false
+    !drifted_tickers(portfolio, alloc, prices, config.bands.as_ref()).is_empty()
 }
 
 /// Per-fill transaction costs: flat commission, proportional spread, and
@@ -875,8 +916,18 @@ pub fn run_multi_asset_backtest(
         curve.push(EquityPoint { date, equity: eq / initial_cash });
 
         let alloc = alloc_fn(&history, ci);
-        if ci == 0 || needs_rebalance(&portfolio, &alloc, &prices, rebalance_config, last_rebalance, date) {
+        if ci == 0 {
+            // Establish the initial book in full regardless of `full`.
             portfolio.rebalance(&alloc, &prices, date, costs);
+            last_rebalance = date;
+        } else if needs_rebalance(&portfolio, &alloc, &prices, rebalance_config, last_rebalance, date) {
+            if rebalance_config.full {
+                portfolio.rebalance(&alloc, &prices, date, costs);
+            } else {
+                // full = false: reset only the names that breached their drift band.
+                let drifted = drifted_tickers(&portfolio, &alloc, &prices, rebalance_config.bands.as_ref());
+                portfolio.rebalance_drifted(&alloc, &prices, date, costs, &drifted);
+            }
             last_rebalance = date;
         }
     }
@@ -1506,6 +1557,41 @@ mod tests {
         .normalize();
         assert!((alloc2.0["X"] - 0.75).abs() < 1e-9);
         assert!((alloc2.0["Y"] - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
+    fn partial_rebalance_touches_only_drifted() {
+        // Three equal-weight names. When one doubles, a fully-invested book's
+        // weights all shift — but with a 10pp band only the doubled name breaches
+        // (the other two drift ~8.3pp). full = false must trade only that name.
+        let d0: NaiveDate = "2024-01-01".parse().unwrap();
+        let mut p = Portfolio::new(3000.0);
+        let alloc = Allocation(HashMap::from([
+            ("X".to_string(), 1.0),
+            ("Y".to_string(), 1.0),
+            ("Z".to_string(), 1.0),
+        ]))
+        .normalize();
+        let p0 = HashMap::from([
+            ("X".to_string(), 100.0), ("Y".to_string(), 100.0), ("Z".to_string(), 100.0),
+        ]);
+        p.rebalance(&alloc, &p0, d0, &FillCosts::ZERO); // 10 shares each
+        assert!((p.shares("X") - 10.0).abs() < 1e-9);
+
+        // X doubles. Only X clears a 10pp absolute band (relative wide-open).
+        let p1 = HashMap::from([
+            ("X".to_string(), 200.0), ("Y".to_string(), 100.0), ("Z".to_string(), 100.0),
+        ]);
+        let bands = BandConfig { absolute: 0.10, relative: 1.0 };
+        let drifted = drifted_tickers(&p, &alloc, &p1, Some(&bands));
+        assert_eq!(drifted, HashSet::from(["X".to_string()]));
+
+        let d1: NaiveDate = "2024-02-01".parse().unwrap();
+        p.rebalance_drifted(&alloc, &p1, d1, &FillCosts::ZERO, &drifted);
+        // Y and Z keep their shares; X is reset to target (1/3 of 4000 equity / 200).
+        assert!((p.shares("Y") - 10.0).abs() < 1e-9, "Y untouched");
+        assert!((p.shares("Z") - 10.0).abs() < 1e-9, "Z untouched");
+        assert!((p.shares("X") - 6.6667).abs() < 1e-3, "X reset to target: {}", p.shares("X"));
     }
 
     #[test]
