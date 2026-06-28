@@ -149,7 +149,7 @@ pub fn BdBadge(
         "accent" => ("var(--accent)",   "var(--accent-soft)", "var(--rust-700)"),
         "gain"   => ("var(--gain)",     "var(--gain-200)",    "var(--gain-600)"),
         "loss"   => ("var(--loss)",     "var(--loss-200)",    "var(--loss-600)"),
-        "warn"   => ("var(--warn)",     "#f0e0b8",            "#8a6a18"),
+        "warn"   => ("var(--warn)",     "var(--warn-200)",    "var(--warn-600)"),
         _        => ("var(--ink-700)",  "var(--paper-200)",   "var(--ink-800)"),
     };
     let bg = if soft { soft_bg } else { solid_bg };
@@ -236,7 +236,7 @@ pub fn BdCallout(
         "accent" => ("var(--accent-soft)", "var(--accent)", "var(--rust-700)"),
         "gain"   => ("var(--gain-200)",    "var(--gain)",   "var(--gain-600)"),
         "loss"   => ("var(--loss-200)",    "var(--loss)",   "var(--loss-600)"),
-        "warn"   => ("#f3e6c2",            "var(--warn)",   "#8a6a18"),
+        "warn"   => ("var(--warn-200)",    "var(--warn)",   "var(--warn-600)"),
         _        => ("var(--paper-200)",   "var(--ink-700)", "var(--text-body)"),
     };
     let style = format!(

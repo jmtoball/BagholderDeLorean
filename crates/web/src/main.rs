@@ -194,7 +194,7 @@ fn trade_timeline(trades: &[TradeEvent], dense: bool) -> View {
 
 fn equity_single(r: &BacktestResult, label: &str) -> View {
     let Some(pts) = to_pts(r) else {
-        return view! { <p style="color:var(--text-on-ink-muted);">"Not enough data."</p> }.into_view();
+        return view! { <p style="color:var(--text-on-ink-muted);">"Not enough history to chart this one."</p> }.into_view();
     };
     let line = svg_path(&pts);
     let (fx, _) = pts[0];
@@ -302,11 +302,11 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                             </linearGradient>
                         </defs>
                         <line x1=x1s.clone() x2=x2s.clone() y1=gy1.clone() y2=gy1
-                              stroke="rgba(246,241,228,0.10)" stroke-width="1" stroke-dasharray="3 5" />
+                              stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
                         <line x1=x1s.clone() x2=x2s.clone() y1=gy2.clone() y2=gy2
-                              stroke="rgba(246,241,228,0.10)" stroke-width="1" stroke-dasharray="3 5" />
+                              stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
                         <line x1=x1s x2=x2s y1=gy3.clone() y2=gy3
-                              stroke="rgba(246,241,228,0.10)" stroke-width="1" stroke-dasharray="3 5" />
+                              stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
                         <path d=area fill="url(#bd_eq_grad)" />
                         <path d=line fill="none" stroke=color stroke-width="2.5"
                               stroke-linejoin="round" stroke-linecap="round" />
@@ -370,7 +370,7 @@ fn equity_overlay(series: &[(String, BacktestResult)]) -> View {
     let series: Vec<&(String, BacktestResult)> =
         series.iter().filter(|(_, r)| r.curve.len() >= 2).collect();
     if series.is_empty() {
-        return view! { <p style="color:var(--text-on-ink-muted);">"Not enough data."</p> }.into_view();
+        return view! { <p style="color:var(--text-on-ink-muted);">"Not enough history to chart this one."</p> }.into_view();
     }
     let (mut dmin, mut dmax) = (i32::MAX, i32::MIN);
     let (mut ymin, mut ymax) = (f64::MAX, f64::MIN_POSITIVE);
@@ -421,9 +421,9 @@ fn equity_overlay(series: &[(String, BacktestResult)]) -> View {
         <div>
             <svg viewBox=vb width="100%" height=hs preserveAspectRatio="none"
                  style="display:block;overflow:visible;">
-                <line x1=x1s.clone() x2=x2s.clone() y1=gy1.clone() y2=gy1 stroke="rgba(246,241,228,0.10)" stroke-width="1" stroke-dasharray="3 5" />
-                <line x1=x1s.clone() x2=x2s.clone() y1=gy2.clone() y2=gy2 stroke="rgba(246,241,228,0.10)" stroke-width="1" stroke-dasharray="3 5" />
-                <line x1=x1s x2=x2s y1=gy3.clone() y2=gy3 stroke="rgba(246,241,228,0.10)" stroke-width="1" stroke-dasharray="3 5" />
+                <line x1=x1s.clone() x2=x2s.clone() y1=gy1.clone() y2=gy1 stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
+                <line x1=x1s.clone() x2=x2s.clone() y1=gy2.clone() y2=gy2 stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
+                <line x1=x1s x2=x2s y1=gy3.clone() y2=gy3 stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
                 {lines}
             </svg>
             <div style="display:flex;flex-wrap:wrap;gap:16px;margin-top:14px;">{legend}</div>
@@ -512,6 +512,31 @@ fn ConcernPanel(
             <div style=inner>{children()}</div>
         </div>
     }
+}
+
+/// Index + uppercase title (+ optional italic question) — the heading that sits
+/// above each config field, matching the ConcernPanel headings.
+fn field_heading(step: Option<&str>, title: &str, question: Option<&str>) -> View {
+    let title = title.to_string();
+    let step  = step.map(str::to_string);
+    let question = question.map(str::to_string);
+    view! {
+        <div style="display:flex;flex-direction:column;gap:2px;padding-left:2px;">
+            <div style="display:flex;align-items:baseline;gap:7px;">
+                {step.map(|s| view! {
+                    <span style="font-family:var(--font-mono);font-weight:700;font-size:11px;\
+                                 color:var(--accent);">{s}</span>
+                })}
+                <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;\
+                             text-transform:uppercase;color:var(--text-strong);white-space:nowrap;">
+                    {title}
+                </span>
+            </div>
+            {question.map(|q| view! {
+                <span style="font-size:11.5px;color:var(--text-muted);font-style:italic;">{q}</span>
+            })}
+        </div>
+    }.into_view()
 }
 
 // ─── App ──────────────────────────────────────────────────────────────────────
@@ -661,32 +686,102 @@ fn App() -> impl IntoView {
     };
 
     view! {
-        // ── Hero banner ───────────────────────────────────────────────────────
-        <header style="background:var(--surface-ink);border-bottom:3px solid var(--ink-900);\
-                       padding:32px var(--gutter) 28px;">
-            <div style="max-width:820px;margin:0 auto;">
-                // Overline pill
-                <span style="display:inline-flex;align-items:center;gap:8px;\
-                              font-family:var(--font-mono);font-weight:700;font-size:10px;\
-                              letter-spacing:0.16em;text-transform:uppercase;\
-                              color:var(--ink-800);background:var(--accent-soft);\
-                              border:2px solid var(--ink-900);border-radius:var(--radius-full);\
-                              padding:5px 12px;box-shadow:var(--shadow-hard-sm);margin-bottom:14px;">
-                    "Backtesting Time Machine"
-                </span>
-                <h1 style="font-family:var(--font-display);font-weight:800;font-size:clamp(28px,5vw,48px);\
-                            letter-spacing:-0.03em;line-height:0.98;\
-                            color:var(--text-on-ink);margin:0 0 10px;">
-                    "Backtest before you " <span style="color:var(--accent-soft);">"baghold."</span>
-                </h1>
-                <p style="font-size:15px;line-height:1.5;color:var(--text-on-ink-muted);margin:0;">
-                    "Send a strategy back in time. Find out if you'd have gotten rich — or ended up holding the bag."
-                </p>
+        // ── Hero ──────────────────────────────────────────────────────────────
+        <section class="bd-grain" style="position:relative;overflow:hidden;min-height:100vh;\
+                       background:var(--teal-700);display:flex;flex-direction:column;">
+            // Moon glow
+            <div style="position:absolute;top:-90px;right:-60px;width:340px;height:340px;\
+                        border-radius:50%;background:radial-gradient(circle at 40% 38%,\
+                        var(--rust-300),var(--rust-600) 70%,var(--rust-700));\
+                        opacity:0.22;filter:blur(2px);pointer-events:none;" />
+            // Brand mark
+            <header style="position:relative;z-index:2;display:flex;align-items:center;\
+                           padding:24px var(--gutter) 4px;max-width:1280px;width:100%;margin:0 auto;">
+                <img src="/assets/logo.png" alt="BagholderDeLorean"
+                     style="height:72px;width:auto;display:block;" />
+            </header>
+            // Hero grid
+            <div class="bd-hero-grid" style="position:relative;z-index:1;flex:1;display:grid;\
+                        gap:48px;align-items:center;max-width:1280px;width:100%;margin:0 auto;\
+                        padding:12px var(--gutter) 32px;">
+                <div style="animation:bd-rise 0.55s var(--ease-out) both;">
+                    <span style="display:inline-flex;align-items:center;gap:8px;\
+                                 font-family:var(--font-mono);font-weight:700;font-size:11px;\
+                                 letter-spacing:0.16em;text-transform:uppercase;color:var(--ink-800);\
+                                 background:var(--accent-soft);border:2px solid var(--ink-900);\
+                                 border-radius:var(--radius-full);padding:6px 13px;\
+                                 box-shadow:var(--shadow-hard-sm);margin-bottom:24px;">
+                        "Backtesting · time machine"
+                    </span>
+                    <h1 style="font-family:var(--font-display);font-weight:800;\
+                                font-size:clamp(40px,6vw,60px);line-height:0.98;\
+                                letter-spacing:-0.03em;margin:0 0 18px;color:var(--paper-50);">
+                        "Backtest before you " <span style="color:var(--accent-soft);">"baghold."</span>
+                    </h1>
+                    <p style="font-size:18px;line-height:1.55;color:var(--text-on-ink-muted);\
+                              max-width:440px;margin:0 0 4px;">
+                        "Send a trading strategy back in time and find out whether you'd have \
+                         gotten rich — or ended up holding the bag. Honest numbers, zero promises."
+                    </p>
+                    <p style="font-family:var(--font-mono);font-size:12px;\
+                              color:var(--text-on-ink-muted);margin:24px 0 0;">
+                        "Past performance is a vibe, not a promise."
+                    </p>
+                </div>
+                <div class="bd-hero-art" style="position:relative;display:flex;justify-content:center;">
+                    <div style="position:relative;animation:bd-pop 0.6s var(--ease-lurch) both;">
+                        <img src="/assets/bagholder-hero.png"
+                             alt="An old bagholder leaning on a DeLorean under a rust-colored moon"
+                             style="display:block;width:100%;max-width:440px;\
+                                    border:4px solid var(--ink-900);border-radius:20px;\
+                                    box-shadow:10px 12px 0 0 var(--ink-900);" />
+                        <div style="position:absolute;left:-28px;bottom:34px;\
+                                    animation:bd-chip 0.7s var(--ease-out) 0.25s both;\
+                                    background:var(--paper-50);border:3px solid var(--ink-900);\
+                                    border-radius:16px;box-shadow:5px 5px 0 0 var(--ink-900);\
+                                    padding:14px 18px;">
+                            <div style="font-family:var(--font-mono);font-weight:700;font-size:10.5px;\
+                                        letter-spacing:0.12em;text-transform:uppercase;\
+                                        color:var(--text-muted);">"Golden Cross · 2019→24"</div>
+                            <div style="display:flex;align-items:baseline;gap:10px;margin-top:4px;">
+                                <span style="font-family:var(--font-mono);font-weight:700;\
+                                             font-size:30px;color:var(--ink-900);">"+34.2%"</span>
+                                <span style="font-family:var(--font-body);font-weight:700;font-size:11px;\
+                                             color:var(--paper-50);background:var(--gain);\
+                                             border:2px solid var(--ink-900);border-radius:var(--radius-full);\
+                                             padding:3px 9px;">"vs +11% SPY"</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
-        </header>
+            // Scroll-down link (native anchor → smooth scroll, no JS)
+            <a href="#app" aria-label="Scroll to the app"
+               style="position:relative;z-index:2;align-self:center;margin-bottom:18px;\
+                      display:inline-flex;flex-direction:column;align-items:center;gap:2px;\
+                      color:var(--text-on-ink-muted);text-decoration:none;\
+                      font-family:var(--font-mono);font-size:11px;letter-spacing:0.1em;\
+                      text-transform:uppercase;">
+                "Run one yourself"
+                <span style="font-size:20px;line-height:1;animation:bd-bob 1.6s var(--ease-out) infinite;">"⌄"</span>
+            </a>
+        </section>
 
-        <main style="max-width:820px;margin:2rem auto;padding:0 var(--gutter);\
-                     display:flex;flex-direction:column;gap:28px;">
+        <main id="app" style="min-height:100vh;border-top:3px solid var(--ink-900);\
+                              background:var(--surface-page);">
+        <div style="max-width:1080px;margin:0 auto;padding:44px var(--gutter) 90px;\
+                    display:flex;flex-direction:column;gap:24px;">
+
+            // Section intro
+            <header style="display:flex;flex-direction:column;align-items:center;text-align:center;">
+                <h2 style="font-family:var(--font-display);font-weight:800;font-size:32px;\
+                           letter-spacing:-0.02em;color:var(--text-strong);margin:0 0 6px;">
+                    "Run a backtest"
+                </h2>
+                <p style="font-size:14.5px;color:var(--text-muted);margin:0;">
+                    "Choose what you trade and how you trade it, then send it back in time."
+                </p>
+            </header>
 
             // Datalist for ticker autocomplete — populated from /api/universe.
             {move || universe.get().map(|tickers| view! {
@@ -695,6 +790,7 @@ fn App() -> impl IntoView {
                 </datalist>
             })}
 
+            <BdCard padding="22px".to_string()>
             <section style="display:flex;flex-direction:column;gap:16px;">
 
                 // ── Two concern panels ────────────────────────────────────────
@@ -880,103 +976,112 @@ fn App() -> impl IntoView {
                     })
                 }}
 
-                // ── Timeframe + Run ───────────────────────────────────────────
+                // ── Amount · Timeframe · Benchmark · Run ──────────────────────
                 {move || {
-                    let a       = action.get();
-                    let has_p03 = matches!(a.as_str(), "sma"|"golden"|"btfd"|"pairs"|"sectorrot"|"congress");
-                    let step    = if has_p03 { "04" } else { "03" };
-                    let prst    = is_preset(&a);
-                    let scr     = sel_method.get() == "screen" && !prst;
-                    let is_busy = busy.get();
-                    let lbl     = if is_busy { "Running\u{2026}" } else if prst { "Run preset" } else if scr { "Run screen" } else { "Run backtest" };
+                    let a        = action.get();
+                    let has_p03  = matches!(a.as_str(), "sma"|"golden"|"btfd"|"pairs"|"sectorrot"|"congress");
+                    let step     = if has_p03 { "04" } else { "03" };
+                    let prst     = is_preset(&a);
+                    let scr      = sel_method.get() == "screen" && !prst;
+                    let is_busy  = busy.get();
+                    let show_bm  = show_benchmark.get();
+                    let lbl      = if is_busy { "Running\u{2026}" } else if prst { "Run preset" } else if scr { "Run screen" } else { "Run backtest" };
                     view! {
-                        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;">
-                            // Amount input
-                            <div style="flex:0 1 160px;min-width:140px;display:flex;flex-direction:column;gap:9px;">
-                                <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
-                                    <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"Amount $"</span>
+                        <div style="display:flex;flex-direction:column;gap:16px;">
+                            // Amount + Timeframe
+                            <div style="display:grid;\
+                                        grid-template-columns:repeat(auto-fit,minmax(220px,1fr));\
+                                        gap:14px;align-items:end;">
+                                <div style="display:flex;flex-direction:column;gap:9px;max-width:220px;">
+                                    {field_heading(None, "Amount $", Some("How much do you put in?"))}
+                                    <BdInput mono=true placeholder="10000".to_string()
+                                        value=format!("{:.0}", initial_amount.get_untracked())
+                                        on_input=Box::new(move |v| {
+                                            if let Ok(n) = v.parse::<f64>() {
+                                                if n > 0.0 { initial_amount.set(n); }
+                                            }
+                                        }) />
                                 </div>
-                                <BdInput mono=true placeholder="10000".to_string()
-                                    value=format!("{:.0}", initial_amount.get_untracked())
-                                    on_input=Box::new(move |v| {
-                                        if let Ok(n) = v.parse::<f64>() {
-                                            if n > 0.0 { initial_amount.set(n); }
-                                        }
-                                    }) />
-                            </div>
-                            // Benchmark toggle + fields
-                            <div style="flex:0 1 auto;display:flex;flex-direction:column;gap:9px;">
-                                <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
-                                    <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"Benchmark"</span>
+                                <div style="display:flex;flex-direction:column;gap:9px;">
+                                    {field_heading(Some(step), "Timeframe", Some("How far back?"))}
+                                    <BdTabs full_width=true
+                                        items=["1y","3y","5y","10y","Max"].iter().map(|t| TabItem {
+                                            value: t.to_string(), label: t.to_string()
+                                        }).collect()
+                                        value=timeframe.get()
+                                        on_change=Box::new(move |v| timeframe.set(v)) />
                                 </div>
-                                <BdSwitch checked=show_benchmark.get()
-                                    on_change=Box::new(move |v| show_benchmark.set(v))
-                                    label="Compare vs.".to_string() />
                             </div>
-                            {move || show_benchmark.get().then(|| view! {
-                                <div style="flex:0 1 120px;min-width:90px;display:flex;flex-direction:column;gap:9px;">
-                                    <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
-                                        <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"vs. Ticker"</span>
+
+                            // Benchmark
+                            <div style="display:flex;flex-direction:column;gap:9px;">
+                                {field_heading(None, "Benchmark", Some("Compare against what?"))}
+                                <div style="display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;\
+                                            min-height:var(--control-md);">
+                                    <div style="height:var(--control-md);display:flex;align-items:center;">
+                                        <BdSwitch checked=show_bm
+                                            on_change=Box::new(move |v| show_benchmark.set(v))
+                                            label="Compare vs.".to_string() />
                                     </div>
-                                    <BdInput mono=true placeholder="SPY".to_string()
-                                        value=benchmark_ticker.get()
-                                        on_input=Box::new(move |v| benchmark_ticker.set(v.trim().to_uppercase())) />
+                                    {show_bm.then(|| view! {
+                                        <div style="width:130px;">
+                                            <BdInput mono=true label="vs. ticker".to_string()
+                                                placeholder="SPY".to_string()
+                                                value=benchmark_ticker.get()
+                                                on_input=Box::new(move |v| benchmark_ticker.set(v.trim().to_uppercase())) />
+                                        </div>
+                                        <div style="flex:1 1 200px;min-width:180px;max-width:300px;">
+                                            <BdSelect label="vs. strategy".to_string()
+                                                on_change=Box::new(move |v| benchmark_strategy.set(v))>
+                                                <option value="buy_and_hold">"Buy and hold"</option>
+                                                <option value="sma_crossover">"SMA crossover (20/50)"</option>
+                                            </BdSelect>
+                                        </div>
+                                    })}
                                 </div>
-                                <div style="flex:0 1 200px;min-width:160px;display:flex;flex-direction:column;gap:9px;">
-                                    <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
-                                        <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"vs. Strategy"</span>
-                                    </div>
-                                    <select
-                                        style="height:var(--control-md);border:var(--border-line) solid var(--ink-800);border-radius:var(--radius-md);background:var(--paper-100);color:var(--text-strong);font-size:var(--text-base);padding:0 12px;cursor:pointer;"
-                                        on:change=move |e| {
-                                            use leptos::ev::Event;
-                                            let v = leptos::event_target_value(&e);
-                                            benchmark_strategy.set(v);
-                                        }>
-                                        <option value="buy_and_hold">"Buy and Hold"</option>
-                                        <option value="sma_crossover">"SMA Crossover (20/50)"</option>
-                                    </select>
-                                </div>
-                            })}
-                            <div style="flex:1 1 280px;min-width:200px;display:flex;flex-direction:column;gap:9px;">
-                                <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
-                                    <span style="font-family:var(--font-mono);font-weight:700;font-size:11px;color:var(--accent);">{step}</span>
-                                    <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"Timeframe"</span>
-                                </div>
-                                <BdTabs full_width=true
-                                    items=["1y","3y","5y","10y","Max"].iter().map(|t| TabItem {
-                                        value: t.to_string(), label: t.to_string()
-                                    }).collect()
-                                    value=timeframe.get()
-                                    on_change=Box::new(move |v| timeframe.set(v)) />
                             </div>
-                            <BdButton variant="primary".to_string() size="lg".to_string()
-                                disabled=is_busy on_click=Box::new(run)>
-                                {lbl}
-                            </BdButton>
+
+                            // Run
+                            <div style="display:flex;justify-content:flex-end;">
+                                <BdButton variant="primary".to_string() size="lg".to_string()
+                                    disabled=is_busy on_click=Box::new(run)>
+                                    {lbl}
+                                </BdButton>
+                            </div>
                         </div>
                     }
                 }}
             </section>
+            </BdCard>
 
             // ── Results ───────────────────────────────────────────────────────
             {move || {
                 let is_busy = busy.get();
                 match (single_result.get(), candidates.get()) {
                     (None, None) if is_busy => view! {
-                        <div style="text-align:center;padding:var(--space-7) 0;color:var(--text-muted);">
-                            "\u{231b} Computing your wealth destruction\u{2026}"
-                        </div>
+                        <BdCard><div style="text-align:center;padding:var(--space-6) var(--space-4);">
+                            <span style="display:inline-block;width:32px;height:32px;\
+                                         border-radius:var(--radius-full);\
+                                         border:4px solid var(--paper-300);border-top-color:var(--accent);\
+                                         animation:bd-spin 0.8s linear infinite;margin-bottom:var(--space-4);" />
+                            <p style="font-family:var(--font-display);font-weight:var(--weight-bold);\
+                                      font-size:var(--text-lg);color:var(--text-strong);margin:0 0 4px;">
+                                "Spinning up the flux capacitor\u{2026}"
+                            </p>
+                            <p style="font-size:var(--text-sm);color:var(--text-muted);margin:0;">
+                                "Replaying the tape tick by tick."
+                            </p>
+                        </div></BdCard>
                     }.into_view(),
 
                     (Some(Err(e)), _) => view! {
-                        <BdCallout tone="loss".to_string() title="Error".to_string()>{e}</BdCallout>
+                        <BdCallout tone="loss".to_string() title="That didn\u{2019}t work".to_string()>{e}</BdCallout>
                     }.into_view(),
 
                     (Some(Ok(r)), _) => equity_single(&r, action_label(&action.get())),
 
                     (None, Some(Err(e))) => view! {
-                        <BdCallout tone="loss".to_string() title="Screen error".to_string()>{e}</BdCallout>
+                        <BdCallout tone="loss".to_string() title="The screen choked".to_string()>{e}</BdCallout>
                     }.into_view(),
 
                     (None, Some(Ok(cands))) => {
@@ -1140,17 +1245,27 @@ fn App() -> impl IntoView {
                     }
 
                     _ => view! {
-                        <div style="text-align:center;padding:var(--space-7) 0;color:var(--text-muted);">
-                            <div style="font-size:var(--text-title);margin-bottom:var(--space-2);">"⏱"</div>
-                            "Define a strategy and run."
-                        </div>
+                        <BdCard><div style="text-align:center;padding:var(--space-6) var(--space-4);color:var(--text-muted);">
+                            <span style="display:inline-flex;width:56px;height:56px;\
+                                         border-radius:var(--radius-full);background:var(--surface-sunken);\
+                                         border:var(--border-line) solid var(--ink-800);color:var(--ink-500);\
+                                         align-items:center;justify-content:center;font-size:var(--text-title);\
+                                         margin-bottom:var(--space-3);">"\u{23EA}"</span>
+                            <p style="font-family:var(--font-display);font-weight:var(--weight-bold);\
+                                      font-size:var(--text-lg);color:var(--text-strong);margin:0 0 4px;">
+                                "Define a strategy and run."
+                            </p>
+                            <p style="font-size:var(--text-sm);margin:0;">
+                                "Pick your inputs above, then send them back in time."
+                            </p>
+                        </div></BdCard>
                     }.into_view(),
                 }
             }}
+        </div>
         </main>
 
-        <footer style="background:var(--teal-800);border-top:3px solid var(--ink-900);\
-                       margin-top:16px;">
+        <footer style="background:var(--teal-800);border-top:3px solid var(--ink-900);">
             <div style="max-width:860px;margin:0 auto;padding:18px var(--gutter);\
                         display:flex;align-items:center;justify-content:space-between;\
                         gap:16px;flex-wrap:wrap;">
