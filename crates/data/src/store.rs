@@ -234,6 +234,22 @@ impl Store {
         }
     }
 
+    /// All US ticker symbols from SEC's directory, lazily populating `cik_map`
+    /// on first use (same pattern as `cik()`).
+    pub fn all_tickers(&self) -> Result<Vec<String>> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT count(*) FROM cik_map", [], |r| r.get(0))?;
+        if count == 0 {
+            self.write_cik_map(&download_cik_map()?)?;
+        }
+        let mut stmt = self.conn.prepare("SELECT ticker FROM cik_map ORDER BY ticker")?;
+        let tickers = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(tickers)
+    }
+
     fn write_cik_map(&self, map: &[(String, i64)]) -> Result<()> {
         self.conn.execute_batch("BEGIN")?;
         {
@@ -515,6 +531,17 @@ mod tests {
         assert_eq!(normalize_ticker("AAPL.US"), "AAPL");
         assert_eq!(normalize_ticker("brk-b.us"), "BRK-B");
         assert_eq!(normalize_ticker("MSFT"), "MSFT");
+    }
+
+    #[test]
+    fn all_tickers_lists_warmed_cik_map() {
+        let s = Store::in_memory().unwrap();
+        // warm cik_map directly so all_tickers() reads it instead of downloading
+        s.write_cik_map(&[("AAPL".into(), 320193), ("BRK-B".into(), 1067983)])
+            .unwrap();
+        let got = s.all_tickers().unwrap();
+        assert!(got.contains(&"AAPL".to_string()));
+        assert!(got.contains(&"BRK-B".to_string()));
     }
 
     #[test]

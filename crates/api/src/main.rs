@@ -355,9 +355,13 @@ async fn screen(
     Ok(Json(candidates))
 }
 
-/// Returns the ticker symbols from DEFAULT_UNIVERSE as a JSON array of strings.
-async fn universe() -> Json<Vec<&'static str>> {
-    Json(bagholder_data::DEFAULT_UNIVERSE.iter().map(|(t, _)| *t).collect())
+/// Returns all US ticker symbols from SEC's directory as a JSON array of strings.
+async fn universe(State(db): State<Db>) -> Result<Json<Vec<String>>, (StatusCode, String)> {
+    let tickers = tokio::task::spawn_blocking(move || db.lock().unwrap().all_tickers())
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+    Ok(Json(tickers))
 }
 
 /// Multi-asset preset backtests: `GET /api/preset?kind=risk_parity&tickers=SPY,QQQ,GLD`
