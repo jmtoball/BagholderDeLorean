@@ -115,6 +115,18 @@ pub struct RealizedSale {
     pub holding_days: i64,
 }
 
+/// A loss sale still inside the US wash-sale window — a repurchase of the same
+/// ticker within 30 days disallows the loss and rolls it into the new lot's
+/// basis. Recorded by `fill` only when `track_wash` is on.
+#[derive(Clone, Debug)]
+pub struct WashLoss {
+    pub date: NaiveDate,
+    pub entry_date: NaiveDate,
+    pub qty: f64,
+    pub loss_per_share: f64,
+    pub long_term: bool,
+}
+
 /// Portfolio state: cash + open lots + running realized P&L.
 /// ponytail: single-currency, no margin — extend for multi-currency or leverage.
 #[derive(Clone, Debug, Default)]
@@ -128,6 +140,11 @@ pub struct Portfolio {
     /// Per-sale realized gains awaiting tax bucketing. The backtest drains this
     /// each bar; non-tax callers simply ignore it.
     pub realized_sales: Vec<RealizedSale>,
+    /// When on (US tax path), `fill` records loss sales here for wash-sale
+    /// matching. Off by default → zero overhead and no behaviour change.
+    pub track_wash: bool,
+    /// Open loss sales eligible to be washed by a later repurchase.
+    pub recent_losses: Vec<WashLoss>,
 }
 
 impl Portfolio {
@@ -172,11 +189,24 @@ impl Portfolio {
                 let closed = lot.qty.min(remaining);
                 let gain = closed * (price - lot.entry_price);
                 let holding_days = (date - lot.entry_date).num_days();
+                let entry_date = lot.entry_date;
+                let entry_price = lot.entry_price;
                 lot.qty -= closed;
                 remaining -= closed;
                 self.realized_pnl += gain;
                 self.cash += closed * price;
                 self.realized_sales.push(RealizedSale { gain, holding_days });
+                // US wash-sale bookkeeping: remember loss sales so a repurchase
+                // within 30 days can disallow the loss (see `wash_replacement`).
+                if self.track_wash && gain < 0.0 {
+                    self.recent_losses.push(WashLoss {
+                        date,
+                        entry_date,
+                        qty: closed,
+                        loss_per_share: entry_price - price,
+                        long_term: holding_days > 365,
+                    });
+                }
             }
             lots.retain(|l| l.qty.abs() > 1e-10);
             // Remainder opens a short position (receive proceeds).
@@ -321,6 +351,55 @@ impl Portfolio {
                 lots.iter().map(|l| l.qty * (p - l.entry_price)).sum::<f64>()
             })
             .sum()
+    }
+
+    /// US wash-sale (IRC §1091). Call right after buying `qty` replacement shares
+    /// of `ticker` at `price` on `date`. Any loss sale of the same ticker within
+    /// the prior 30 days is disallowed: the loss is rolled into the replacement
+    /// lot's basis and the sold lot's holding period is carried onto it. Returns
+    /// the disallowed loss split `(short_term, long_term)` so the caller can back
+    /// it out of the year's taxable pool. "Substantially identical" = same ticker.
+    /// ponytail: handles the sale→repurchase direction (the Pub 550 worked example
+    /// and the dominant single-position pattern); the rarer repurchase-then-sale
+    /// direction is out of scope under this single-symbol target-weight model.
+    pub fn wash_replacement(&mut self, ticker: &str, date: NaiveDate, qty: f64, price: f64) -> (f64, f64) {
+        // Drop losses that have aged out of the 61-day window (>30 days before).
+        self.recent_losses
+            .retain(|l| l.qty > 1e-9 && (0..=30).contains(&(date - l.date).num_days()));
+
+        let mut st_disallowed = 0.0;
+        let mut lt_disallowed = 0.0;
+        let mut remaining = qty;
+        for li in 0..self.recent_losses.len() {
+            if remaining <= 1e-9 { break; }
+            let l = self.recent_losses[li].clone();
+            let w = remaining.min(l.qty);
+            let disallowed = w * l.loss_per_share;
+            if l.long_term { lt_disallowed += disallowed } else { st_disallowed += disallowed }
+            // Replacement basis absorbs the per-share loss; holding period carries
+            // (effective entry = buy date minus the sold lot's holding span).
+            let prior_holding = (l.date - l.entry_date).num_days();
+            let effective_entry = date - chrono::Duration::days(prior_holding);
+            self.carve_wash(ticker, price, date, w, price + l.loss_per_share, effective_entry);
+            self.recent_losses[li].qty -= w;
+            remaining -= w;
+        }
+        self.recent_losses.retain(|l| l.qty > 1e-9);
+        (st_disallowed, lt_disallowed)
+    }
+
+    /// Move `w` shares of the just-bought plain lot (entry `buy_price`/`buy_date`)
+    /// into a washed lot carrying `new_basis` and `effective_entry`. Net share
+    /// count is unchanged — only basis and holding period shift.
+    fn carve_wash(&mut self, ticker: &str, buy_price: f64, buy_date: NaiveDate, w: f64, new_basis: f64, effective_entry: NaiveDate) {
+        let lots = self.positions.entry(ticker.to_owned()).or_default();
+        if let Some(lot) = lots.iter_mut().find(|l| {
+            l.qty > 1e-9 && (l.entry_price - buy_price).abs() < 1e-9 && l.entry_date == buy_date
+        }) {
+            lot.qty -= w.min(lot.qty);
+        }
+        lots.retain(|l| l.qty.abs() > 1e-10);
+        lots.push(Lot { qty: w, entry_price: new_basis, entry_date: effective_entry });
     }
 }
 
@@ -1267,6 +1346,9 @@ pub fn run_portfolio_backtest_taxed(
     let mut gen = strategy.clone().into_generator();
     let mut portfolio = Portfolio::new(initial_cash);
     portfolio.accounting = tax.accounting;
+    // US wash-sale only: track loss sales so a repurchase within 30 days washes them.
+    let wash = tax.system == TaxSystem::UsFederal;
+    portfolio.track_wash = wash;
     let mut curve = Vec::with_capacity(bars.len());
     let mut trades: Vec<TradeEvent> = Vec::new();
 
@@ -1341,6 +1423,14 @@ pub fn run_portfolio_backtest_taxed(
         // Bucket this bar's realized sales into the current year's taxable pool.
         for s in portfolio.realized_sales.drain(..) {
             if s.holding_days > 365 { year_lt += s.gain } else { year_st += s.gain }
+        }
+
+        // A buy may be a wash-sale replacement for a recent loss — back the
+        // disallowed loss out of the pool (it moves into the new lot's basis).
+        if wash && delta > 1e-9 {
+            let (st_off, lt_off) = portfolio.wash_replacement(ticker, bar.date, delta, bar.close);
+            year_st += st_off;
+            year_lt += lt_off;
         }
     }
 
@@ -1703,6 +1793,45 @@ mod tests {
         assert_eq!(p.realized_sales.len(), 2);
         assert!(p.realized_sales[0].holding_days > 365);
         assert!(p.realized_sales[1].holding_days <= 365);
+    }
+
+    // --- F4: US wash-sale ---------------------------------------------------
+
+    #[test]
+    fn wash_sale_disallows_loss_and_rolls_into_replacement_basis() {
+        // IRS Pub 550 worked example: buy 100 @ 1000, sell @ 750 (−250/sh),
+        // rebuy 100 @ 800 within 30 days → loss disallowed, basis = 1050.
+        let d = |s: &str| s.parse::<NaiveDate>().unwrap();
+        let mut p = Portfolio::new(200_000.0);
+        p.track_wash = true;
+        p.fill("X", 100.0, 1000.0, d("2021-01-04"));
+        p.fill("X", -100.0, 750.0, d("2021-02-01")); // realizes −25,000
+        assert_eq!(p.recent_losses.len(), 1);
+        p.fill("X", 100.0, 800.0, d("2021-02-10")); // replacement
+        let (st, lt) = p.wash_replacement("X", d("2021-02-10"), 100.0, 800.0);
+        assert!((st - 25_000.0).abs() < 1e-6, "whole short-term loss disallowed");
+        assert_eq!(lt, 0.0);
+        let lots = &p.positions["X"];
+        let washed = lots.iter().find(|l| (l.entry_price - 1050.0).abs() < 1e-6)
+            .expect("replacement lot at basis 1050");
+        assert!((washed.qty - 100.0).abs() < 1e-9);
+        assert!(washed.entry_date < d("2021-02-10"), "holding period carried back");
+        assert_eq!(p.recent_losses.len(), 0, "loss consumed");
+    }
+
+    #[test]
+    fn loss_outside_window_is_not_washed() {
+        let d = |s: &str| s.parse::<NaiveDate>().unwrap();
+        let mut p = Portfolio::new(200_000.0);
+        p.track_wash = true;
+        p.fill("X", 100.0, 1000.0, d("2021-01-04"));
+        p.fill("X", -100.0, 750.0, d("2021-02-01")); // loss
+        p.fill("X", 100.0, 800.0, d("2021-04-01")); // 59 days later — out of window
+        let (st, lt) = p.wash_replacement("X", d("2021-04-01"), 100.0, 800.0);
+        assert_eq!((st, lt), (0.0, 0.0), "no wash outside the 30-day window");
+        // Replacement keeps its plain 800 basis; the loss stays allowed.
+        let lots = &p.positions["X"];
+        assert!(lots.iter().any(|l| (l.entry_price - 800.0).abs() < 1e-9));
     }
 
     // A rise through 2020 then a 2021 crash, so an SMA crossover enters long and
