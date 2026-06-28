@@ -517,8 +517,9 @@ async fn main() {
         .layer(CorsLayer::permissive())
         .with_state(db);
 
-    let addr = "127.0.0.1:3000";
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+    let addr = format!("0.0.0.0:{port}");
+    let listener = tokio::net::TcpListener::bind(addr.as_str()).await.unwrap();
     println!("listening on http://{addr}");
     axum::serve(listener, app).await.unwrap();
 }

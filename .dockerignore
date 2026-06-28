@@ -1,0 +1,5 @@
+target
+bagholder.duckdb
+bagholder.duckdb.wal
+crates/web/dist
+.git

@@ -1,7 +1,8 @@
 # ── Stage 1: chef planner — capture the dependency graph ──────────────────────
 FROM rust:1-slim-bookworm AS chef
+# g++ is required: libduckdb-sys compiles a bundled C++ amalgamation.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev ca-certificates curl && rm -rf /var/lib/apt/lists/*
+    pkg-config libssl-dev ca-certificates curl g++ && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked
 
 WORKDIR /app
@@ -29,7 +30,7 @@ RUN trunk build --release
 # ── Stage 4: API binary ───────────────────────────────────────────────────────
 FROM rust:1-slim-bookworm AS api-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
+    pkg-config libssl-dev ca-certificates g++ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=builder-deps /usr/local/cargo /usr/local/cargo
@@ -46,6 +47,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=api-builder /app/target/release/bagholder-api /usr/local/bin/bagholder-api
+# ServeDir reads crates/web/dist relative to the workdir at runtime — not embedded.
+WORKDIR /app
+COPY --from=wasm-builder /app/crates/web/dist crates/web/dist
 
 ENV PORT=3000
 EXPOSE 3000

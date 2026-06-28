@@ -9,7 +9,8 @@
     <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Hanken+Grotesk:ital,wght@0,400..800;1,400..600&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet" />
     <link data-trunk rel="css" href="styles/ds.css" />
     <link data-trunk rel="copy-dir" href="assets" />
-    <link data-trunk rel="rust" data-wasm-opt="z" />
+    <!-- ponytail: wasm-opt off — its binaryen v116 download 404s on arm64; re-enable ("z") once trunk/binaryen ship an aarch64 archive, or apt-install binaryen in the wasm stage -->
+    <link data-trunk rel="rust" data-wasm-opt="0" />
   </head>
   <body></body>
 </html>
