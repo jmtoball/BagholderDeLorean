@@ -681,50 +681,6 @@ impl Strategy {
         }
     }
 
-    /// Batch signals — kept for `run_backtest` and the `sma_has_no_lookahead` test.
-    /// ponytail: BuyTheDip routes through its generator with synthetic bar dates.
-    fn signals(&self, closes: &[f64]) -> Vec<f64> {
-        match *self {
-            Strategy::BuyAndHold => vec![1.0; closes.len()],
-            Strategy::SmaCrossover { fast, slow } => {
-                let f = sma(closes, fast);
-                let s = sma(closes, slow);
-                (0..closes.len())
-                    .map(|i| match (f[i], s[i]) {
-                        (Some(a), Some(b)) if a > b => 1.0,
-                        _ => 0.0,
-                    })
-                    .collect()
-            }
-            Strategy::BuyTheDip { rsi_period, rsi_threshold, bb_period, bb_std } => {
-                let mut gen = BuyTheDipGen {
-                    rsi_period, rsi_threshold, bb_period, bb_std,
-                    closes: Vec::new(), avg_gain: 0.0, avg_loss: 0.0, rsi_ready: false,
-                };
-                let base = chrono::NaiveDate::from_num_days_from_ce_opt(737000).unwrap();
-                closes.iter().enumerate().map(|(i, &c)| {
-                    gen.next(&Bar {
-                        date: base + chrono::Duration::days(i as i64),
-                        open: c, high: c, low: c, close: c, volume: 0.0,
-                    })
-                }).collect()
-            }
-            Strategy::RegimeMeanReversion { rsi_period, rsi_entry, rsi_exit, adx_period, adx_threshold } => {
-                let mut gen = RegimeMRGen {
-                    rsi_period, rsi_entry, rsi_exit, adx_threshold,
-                    closes: Vec::new(), avg_gain: 0.0, avg_loss: 0.0, rsi_ready: false,
-                    adx: AdxState::new(adx_period), in_position: false,
-                };
-                let base = chrono::NaiveDate::from_num_days_from_ce_opt(737000).unwrap();
-                closes.iter().enumerate().map(|(i, &c)| {
-                    gen.next(&Bar {
-                        date: base + chrono::Duration::days(i as i64),
-                        open: c, high: c, low: c, close: c, volume: 0.0,
-                    })
-                }).collect()
-            }
-        }
-    }
 }
 
 /// Inverse-volatility allocation across tickers. Each ticker's weight is
@@ -942,24 +898,6 @@ fn rolling_adv(bars: &[Bar], i: usize, window: usize) -> f64 {
 }
 
 /// Rolling simple moving average; `None` until the window fills. O(n).
-fn sma(xs: &[f64], window: usize) -> Vec<Option<f64>> {
-    let mut out = vec![None; xs.len()];
-    if window == 0 {
-        return out;
-    }
-    let mut sum = 0.0;
-    for i in 0..xs.len() {
-        sum += xs[i];
-        if i >= window {
-            sum -= xs[i - window];
-        }
-        if i + 1 >= window {
-            out[i] = Some(sum / window as f64);
-        }
-    }
-    out
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Metrics {
     pub total_return: f64,
@@ -1003,7 +941,7 @@ pub struct PositionSummary {
 pub struct BacktestResult {
     pub curve: Vec<EquityPoint>,
     pub metrics: Metrics,
-    /// Per-position breakdown; empty for legacy `run_backtest` results.
+    /// Per-position breakdown; empty for single-asset results.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub positions: Vec<PositionSummary>,
     /// Trade log: buy/sell events as signals transition. Empty for multi-asset presets.
@@ -1043,47 +981,9 @@ impl BacktestResult {
     }
 }
 
-/// Close-to-close simulation. Equity starts at 1.0; each day applies
-/// `yesterday's signal * today's return`, so no future data leaks in.
-pub fn run_backtest(bars: &[Bar], strategy: &Strategy) -> BacktestResult {
-    let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
-    let signals = strategy.signals(&closes);
-    let mut equity = 1.0;
-    let mut curve = Vec::with_capacity(bars.len());
-    let mut rets = Vec::with_capacity(bars.len().saturating_sub(1));
-    for i in 0..bars.len() {
-        if i > 0 {
-            let pct = closes[i] / closes[i - 1] - 1.0;
-            let r = signals[i - 1] * pct;
-            equity *= 1.0 + r;
-            rets.push(r);
-        }
-        curve.push(EquityPoint {
-            date: bars[i].date,
-            equity,
-        });
-    }
-    let metrics = compute_metrics(&curve, &rets);
-    BacktestResult {
-        curve,
-        metrics,
-        positions: vec![],
-        trades: vec![],
-        entry_date: None,
-        entry_pe: None,
-        entry_index: None,
-        entry_count: None,
-        initial_amount: 10_000.0,
-        final_value: 0.0,
-        benchmark: None,
-    }
-}
-
 /// Event-driven single-asset backtest using the portfolio state model.
 /// Processes bars in chronological order; at each bar, marks to market then
-/// rebalances to `signal * equity / price` shares at the bar's close.
-///
-/// Produces the same equity curve as `run_backtest` (verified by parity tests).
+/// rebalances to `signal * equity / price` shares at the bar's close (no lookahead).
 pub fn run_portfolio_backtest(
     ticker: &str,
     bars: &[Bar],
@@ -1255,7 +1155,7 @@ pub fn local_minima(series: &[(NaiveDate, f64)], window: usize) -> Vec<usize> {
 /// Build signals from congressional disclosure events.
 /// `disclosures` is `(execution_date, target_weight)` sorted by date — use either
 /// `CongressTrade::transaction_date` (naive) or `::filing_date` (point-in-time).
-/// `signals[i]` is the weight observed at `bars[i]`; `run_backtest` applies
+/// `signals[i]` is the weight observed at `bars[i]`; the engine applies
 /// `signals[i-1]` to bar `i`'s return — no lookahead.
 pub fn congress_signals(bars: &[Bar], disclosures: &[(NaiveDate, f64)]) -> Vec<f64> {
     let mut signals = vec![0.0f64; bars.len()];
@@ -1418,7 +1318,7 @@ mod tests {
             bar("2020-01-02", 110.0),
             bar("2020-01-03", 90.0),
         ];
-        let r = run_backtest(&bars, &Strategy::BuyAndHold);
+        let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &[]);
         assert!(r.metrics.sharpe.is_finite());
         assert!(r.metrics.sortino.is_finite());
         // One negative return → downside dev > 0 → Sortino is finite and positive if total > 0.
@@ -1430,7 +1330,7 @@ mod tests {
             bar("2020-01-02", 110.0),
             bar("2020-01-03", 121.0),
         ];
-        let r_up = run_backtest(&bars_up, &Strategy::BuyAndHold);
+        let r_up = run_portfolio_backtest("X", &bars_up, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &[]);
         assert_eq!(r_up.metrics.sortino, f64::INFINITY);
         assert_eq!(r_up.metrics.recovery_factor, 0.0); // no drawdown
     }
@@ -1442,7 +1342,7 @@ mod tests {
             bar("2020-01-02", 110.0),
             bar("2020-01-03", 121.0),
         ];
-        let r = run_backtest(&bars, &Strategy::BuyAndHold);
+        let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &[]);
         assert!((r.curve.last().unwrap().equity - 1.21).abs() < 1e-9);
         assert!((r.metrics.total_return - 0.21).abs() < 1e-9);
         assert!(r.metrics.max_drawdown.abs() < 1e-9); // monotonic up => no drawdown
@@ -1636,32 +1536,6 @@ mod tests {
         assert!((impact_large - 1.0).abs() < 1e-9);
         assert!((impact_small - 0.5).abs() < 1e-9);
         let _ = d; // suppress unused warning
-    }
-
-    #[test]
-    fn portfolio_backtest_parity_with_legacy() {
-        let bars = vec![bar("2020-01-01", 100.0), bar("2020-01-02", 110.0), bar("2020-01-03", 121.0)];
-        let legacy = run_backtest(&bars, &Strategy::BuyAndHold);
-        let new = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10000.0, &FillCosts::ZERO, 0.0, &[]);
-        for (l, p) in legacy.curve.iter().zip(new.curve.iter()) {
-            assert!((l.equity - p.equity).abs() < 1e-9, "mismatch at {}", l.date);
-        }
-        assert!((legacy.metrics.total_return - new.metrics.total_return).abs() < 1e-9);
-    }
-
-    #[test]
-    fn portfolio_backtest_no_lookahead_sma() {
-        // SMA crossover via portfolio loop must match the scalar loop (which the
-        // sma_has_no_lookahead test already proves is signal-clean).
-        let bars: Vec<Bar> = (1..=10)
-            .map(|i| bar(&format!("2020-01-{:02}", i), (i * 10) as f64))
-            .collect();
-        let strategy = Strategy::SmaCrossover { fast: 2, slow: 4 };
-        let legacy = run_backtest(&bars, &strategy);
-        let new = run_portfolio_backtest("X", &bars, &strategy, 1000.0, &FillCosts::ZERO, 0.0, &[]);
-        for (l, p) in legacy.curve.iter().zip(new.curve.iter()) {
-            assert!((l.equity - p.equity).abs() < 1e-9, "SMA mismatch at {}", l.date);
-        }
     }
 
     #[test]
@@ -1973,8 +1847,12 @@ mod tests {
 
     #[test]
     fn sma_has_no_lookahead() {
-        let closes: Vec<f64> = (1..=10).map(|x| x as f64).collect();
-        let sig = Strategy::SmaCrossover { fast: 2, slow: 4 }.signals(&closes);
+        // Drive the incremental generator one bar at a time; the signal it emits
+        // at bar i must depend only on closes through i (no future leak).
+        let mut gen = Strategy::SmaCrossover { fast: 2, slow: 4 }.into_generator();
+        let sig: Vec<f64> = (1..=10)
+            .map(|i| gen.next(&bar(&format!("2020-01-{i:02}"), i as f64)))
+            .collect();
         // flat until the slow window fills...
         assert_eq!(sig[0], 0.0);
         assert_eq!(sig[2], 0.0);
