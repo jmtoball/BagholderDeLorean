@@ -59,6 +59,21 @@ pub struct CorporateAction {
     pub kind: CaKind,
 }
 
+/// One disclosed congressional stock transaction (STOCK Act PTR).
+/// Both dates are kept: transaction_date (when the trade occurred) and
+/// filing_date (when publicly disclosed — typically 30–45 days later).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CongressTrade {
+    pub member: String,
+    pub ticker: String,
+    pub transaction_date: NaiveDate,
+    pub filing_date: NaiveDate,
+    /// "purchase", "sale", "sale_partial", "exchange"
+    pub trade_type: String,
+    /// Disclosed amount bucket, e.g. "$15,001 - $50,000"
+    pub amount_range: String,
+}
+
 /// Trailing-twelve-month price/earnings from the latest close and the four most
 /// recent quarterly EPS figures (most-recent-first). `None` when EPS history is
 /// short or trailing earnings are non-positive (P/E is then undefined).
@@ -1171,6 +1186,55 @@ pub fn local_minima(series: &[(NaiveDate, f64)], window: usize) -> Vec<usize> {
     mins
 }
 
+/// Build signals from congressional disclosure events.
+/// `disclosures` is `(execution_date, target_weight)` sorted by date — use either
+/// `CongressTrade::transaction_date` (naive) or `::filing_date` (point-in-time).
+/// `signals[i]` is the weight observed at `bars[i]`; `run_backtest` applies
+/// `signals[i-1]` to bar `i`'s return — no lookahead.
+pub fn congress_signals(bars: &[Bar], disclosures: &[(NaiveDate, f64)]) -> Vec<f64> {
+    let mut signals = vec![0.0f64; bars.len()];
+    let mut current = 0.0f64;
+    let mut di = 0;
+    for (i, bar) in bars.iter().enumerate() {
+        while di < disclosures.len() && disclosures[di].0 <= bar.date {
+            current = disclosures[di].1;
+            di += 1;
+        }
+        signals[i] = current;
+    }
+    signals
+}
+
+/// Run a single-ticker backtest driven by pre-computed event signals.
+/// `events` = `(execution_date, target_weight)` — works for congressional trades,
+/// Cramer call fades, or any dated event-signal source.
+pub fn run_event_backtest(bars: &[Bar], events: &[(NaiveDate, f64)]) -> BacktestResult {
+    let signals = congress_signals(bars, events);
+    let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
+    let mut equity = 1.0f64;
+    let mut curve = Vec::with_capacity(bars.len());
+    let mut rets: Vec<f64> = Vec::with_capacity(bars.len().saturating_sub(1));
+    for i in 0..bars.len() {
+        if i > 0 {
+            let pct = closes[i] / closes[i - 1] - 1.0;
+            let r = signals[i - 1] * pct;
+            equity *= 1.0 + r;
+            rets.push(r);
+        }
+        curve.push(EquityPoint { date: bars[i].date, equity });
+    }
+    let metrics = compute_metrics(&curve, &rets);
+    BacktestResult {
+        curve,
+        metrics,
+        positions: vec![],
+        entry_date: None,
+        entry_pe: None,
+        entry_index: None,
+        entry_count: None,
+    }
+}
+
 fn compute_metrics(curve: &[EquityPoint], rets: &[f64]) -> Metrics {
     let total_return = curve.last().map(|p| p.equity - 1.0).unwrap_or(0.0);
     let years = (curve.len().max(1) as f64) / 252.0; // ~252 trading days/year
@@ -1731,6 +1795,28 @@ mod tests {
         }];
         let r = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 1000.0, &FillCosts::ZERO, 0.0, &actions);
         assert!((r.curve[1].equity - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn congress_signals_use_correct_date_in_each_mode() {
+        // 80 bars. Purchase disclosed on bar 20 (transaction date); filed on bar 60 (~40-day lag).
+        let bars: Vec<Bar> = (0..80)
+            .map(|i| bar(&format!("2022-{:02}-{:02}", i / 28 + 1, i % 28 + 1), 100.0))
+            .collect();
+
+        // Naive mode (transaction date): signal turns on at bar 20.
+        let naive = congress_signals(&bars, &[(bars[20].date, 1.0), (bars[60].date, 0.0)]);
+        assert_eq!(naive[19], 0.0, "before transaction date: no signal");
+        assert_eq!(naive[20], 1.0, "at transaction date: enter");
+        assert_eq!(naive[60], 0.0, "at sale transaction date: exit");
+
+        // Realistic mode (filing date): signal only turns on at bar 60.
+        let realistic = congress_signals(&bars, &[(bars[60].date, 1.0)]);
+        assert_eq!(realistic[59], 0.0, "before filing date: no signal");
+        assert_eq!(realistic[60], 1.0, "at filing date: enter");
+
+        // Two modes produce different signals in bars 20–59 (the lag window).
+        assert!(naive[30] != realistic[30], "modes differ in the lag window");
     }
 
     #[test]

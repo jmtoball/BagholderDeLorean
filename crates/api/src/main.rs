@@ -10,10 +10,10 @@ use axum::{
     Json, Router,
 };
 use bagholder_core::{
-    econ_cycle_alloc, inverse_vol_alloc, local_minima, momentum_alloc, pairs_alloc, pe_history,
-    pe_series, run_multi_asset_backtest, run_portfolio_backtest, Bar, BacktestResult, BandConfig,
-    Candidate, CorporateAction, FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy,
-    SECTOR_ETFS,
+    econ_cycle_alloc, inverse_vol_alloc, local_minima, momentum_alloc,
+    pairs_alloc, pe_history, pe_series, run_event_backtest, run_multi_asset_backtest,
+    run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate, CongressTrade,
+    CorporateAction, FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy, SECTOR_ETFS,
 };
 use std::collections::HashMap;
 use bagholder_data::Store;
@@ -37,6 +37,10 @@ struct BacktestQuery {
     entry: Option<String>,
     /// Trough window for `entry=pe_min`, in trading days (default ~a quarter).
     pe_window: Option<usize>,
+    /// For strategy=congress_copy_trade: which year's disclosures to use (default: 2023).
+    year: Option<u32>,
+    /// For strategy=congress_copy_trade: true = use filing date (realistic), false = transaction date (naive).
+    use_filing_date: Option<bool>,
     /// Which trough to enter, counting back from most recent (0 = latest).
     /// Clamped to the available range.
     pe_index: Option<usize>,
@@ -72,10 +76,72 @@ fn trim_years(mut bars: Vec<Bar>, years: Option<u32>) -> Vec<Bar> {
     bars
 }
 
+/// Convert congress trade records to `(execution_date, weight)` signal events.
+/// `weight` = 1.0 for purchases, 0.0 for sales. Caller chooses the date field.
+fn congress_disclosures(
+    trades: &[CongressTrade],
+    ticker: &str,
+    use_filing_date: bool,
+) -> Vec<(chrono::NaiveDate, f64)> {
+    let mut events: Vec<(chrono::NaiveDate, f64)> = trades
+        .iter()
+        .filter(|t| t.ticker.eq_ignore_ascii_case(ticker))
+        .map(|t| {
+            let date = if use_filing_date { t.filing_date } else { t.transaction_date };
+            let weight = if t.trade_type.contains("sale") { 0.0 } else { 1.0 };
+            (date, weight)
+        })
+        .collect();
+    events.sort_by_key(|(d, _)| *d);
+    events
+}
+
 async fn backtest(
     State(db): State<Db>,
     Query(q): Query<BacktestQuery>,
 ) -> Result<Json<BacktestResult>, (StatusCode, String)> {
+    // Inverse Cramer: separate path — fades Cramer calls (buy→short, sell→long).
+    if q.strategy == "cramer_inverse" {
+        let ticker = q.ticker.clone();
+        let (bars, calls) = tokio::task::spawn_blocking(move || {
+            let db = db.lock().unwrap();
+            let bars = db.ohlcv(&ticker)?;
+            let calls = db.cramer_calls(&ticker)?;
+            Ok::<_, anyhow::Error>((bars, calls))
+        })
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+
+        let mut events: Vec<(chrono::NaiveDate, f64)> = calls
+            .iter()
+            .map(|c| (c.date, if c.call == "buy" { -1.0 } else { 1.0 }))
+            .collect();
+        events.sort_by_key(|(d, _)| *d);
+        let bars = trim_years(bars, q.years);
+        return Ok(Json(run_event_backtest(&bars, &events)));
+    }
+
+    // Congress copy-trade: separate path — uses external disclosure signals.
+    if q.strategy == "congress_copy_trade" {
+        let ticker = q.ticker.clone();
+        let year = q.year.unwrap_or(2023);
+        let use_filing = q.use_filing_date.unwrap_or(false);
+        let (bars, trades) = tokio::task::spawn_blocking(move || {
+            let db = db.lock().unwrap();
+            let bars = db.ohlcv(&ticker)?;
+            let trades = db.congress_trades(year)?;
+            Ok::<_, anyhow::Error>((bars, trades))
+        })
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+
+        let disclosures = congress_disclosures(&trades, &q.ticker, use_filing);
+        let bars = trim_years(bars, q.years);
+        return Ok(Json(run_event_backtest(&bars, &disclosures)));
+    }
+
     let strategy = match q.strategy.as_str() {
         "sma_crossover" => Strategy::SmaCrossover {
             fast: q.fast.unwrap_or(20),

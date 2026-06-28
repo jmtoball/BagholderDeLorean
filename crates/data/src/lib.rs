@@ -2,8 +2,12 @@
 //! API crate calls these off the async runtime via `spawn_blocking`. Kept out
 //! of the WASM web crate.
 
+mod congress;
+mod cramer;
 mod screen;
 mod store;
+pub use congress::download_congress_trades;
+pub use cramer::{download_cramer_calls, CramerCall};
 pub use screen::{low_pe, DEFAULT_UNIVERSE};
 pub use store::Store;
 

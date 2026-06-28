@@ -2,9 +2,10 @@
 //! SQL, fast range scans for backtests. OHLCV is a wide table; fundamentals is
 //! tall (`ticker, period, metric, value`) so the metric set stays open-ended.
 
-use crate::{download_cik_map, download_corporate_actions, download_fred_series, download_fundamentals, download_ohlcv};
+use crate::{download_cik_map, download_congress_trades, download_corporate_actions, download_cramer_calls, download_fred_series, download_fundamentals, download_ohlcv};
+use crate::cramer::CramerCall;
 use anyhow::{Context, Result};
-use bagholder_core::{Bar, CaKind, CorporateAction, Fundamental};
+use bagholder_core::{Bar, CaKind, CongressTrade, CorporateAction, Fundamental};
 use chrono::NaiveDate;
 use duckdb::{params, Connection};
 
@@ -43,6 +44,25 @@ CREATE TABLE IF NOT EXISTS corporate_actions (
 );
 -- Sentinel: tracks which tickers have had their CA fetched (handles zero-action case).
 CREATE TABLE IF NOT EXISTS ca_fetched (ticker TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS congress_trades (
+  member           TEXT NOT NULL,
+  ticker           TEXT NOT NULL,
+  transaction_date DATE NOT NULL,
+  filing_date      DATE NOT NULL,
+  trade_type       TEXT NOT NULL,
+  amount_range     TEXT NOT NULL,
+  PRIMARY KEY (member, ticker, transaction_date, trade_type, amount_range)
+);
+-- Sentinel: tracks which years have been fully fetched.
+CREATE TABLE IF NOT EXISTS congress_fetched (year INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS cramer_calls (
+  ticker TEXT NOT NULL,
+  date   DATE NOT NULL,
+  call   TEXT NOT NULL,  -- 'buy' or 'sell'
+  PRIMARY KEY (ticker, date, call)
+);
+-- Any row here means the full dataset has been loaded.
+CREATE TABLE IF NOT EXISTS cramer_fetched (sentinel INTEGER PRIMARY KEY);
 ";
 
 /// Strip Stooq's exchange suffix and upper-case, so "AAPL.US" -> "AAPL" and
@@ -268,6 +288,106 @@ impl Store {
                     CaKind::Dividend { amount_per_share } => ("dividend", None, Some(*amount_per_share)),
                 };
                 stmt.execute(params![ticker, a.ex_date, action_type, ratio, amount])?;
+            }
+        }
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
+    /// Cached congressional PTR trades for `year`. Downloads on first access;
+    /// ponytail: cache-forever — re-fetch by deleting rows for the year and the sentinel.
+    pub fn congress_trades(&self, year: u32) -> Result<Vec<CongressTrade>> {
+        let fetched: i64 = self.conn.query_row(
+            "SELECT count(*) FROM congress_fetched WHERE year = ?",
+            [year],
+            |r| r.get(0),
+        )?;
+        if fetched > 0 {
+            return self.read_congress_trades(year);
+        }
+        let trades = download_congress_trades(year)?;
+        self.write_congress_trades(&trades)?;
+        self.conn.execute("INSERT OR IGNORE INTO congress_fetched VALUES (?)", [year])?;
+        Ok(trades)
+    }
+
+    fn read_congress_trades(&self, year: u32) -> Result<Vec<CongressTrade>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT member, ticker, transaction_date, filing_date, trade_type, amount_range \
+             FROM congress_trades \
+             WHERE cast(strftime('%Y', filing_date) as integer) = ? \
+             ORDER BY filing_date, member, ticker",
+        )?;
+        let rows = stmt
+            .query_map([year], |r| {
+                Ok(CongressTrade {
+                    member: r.get(0)?,
+                    ticker: r.get(1)?,
+                    transaction_date: r.get(2)?,
+                    filing_date: r.get(3)?,
+                    trade_type: r.get(4)?,
+                    amount_range: r.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn write_congress_trades(&self, trades: &[CongressTrade]) -> Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        {
+            let mut stmt = self.conn.prepare(
+                "INSERT OR IGNORE INTO congress_trades VALUES (?, ?, ?, ?, ?, ?)",
+            )?;
+            for t in trades {
+                stmt.execute(params![
+                    t.member,
+                    t.ticker,
+                    t.transaction_date,
+                    t.filing_date,
+                    t.trade_type,
+                    t.amount_range
+                ])?;
+            }
+        }
+        self.conn.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
+    /// Cramer calls for a specific ticker, loading the full dataset on first access.
+    /// ponytail: cache-forever; the upstream dataset is frozen ~2016–2022.
+    pub fn cramer_calls(&self, ticker: &str) -> Result<Vec<CramerCall>> {
+        let fetched: i64 = self.conn.query_row(
+            "SELECT count(*) FROM cramer_fetched", [], |r| r.get(0),
+        )?;
+        if fetched == 0 {
+            let calls = download_cramer_calls()?;
+            self.write_cramer_calls(&calls)?;
+            self.conn.execute("INSERT OR IGNORE INTO cramer_fetched VALUES (1)", [])?;
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT ticker, date, call FROM cramer_calls WHERE ticker = ? ORDER BY date",
+        )?;
+        let rows = stmt
+            .query_map([ticker], |r| {
+                Ok(CramerCall {
+                    ticker: r.get(0)?,
+                    date: r.get(1)?,
+                    call: r.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn write_cramer_calls(&self, calls: &[CramerCall]) -> Result<()> {
+        self.conn.execute_batch("BEGIN")?;
+        {
+            let mut stmt = self
+                .conn
+                .prepare("INSERT OR IGNORE INTO cramer_calls VALUES (?, ?, ?)")?;
+            for c in calls {
+                stmt.execute(params![c.ticker, c.date, c.call])?;
             }
         }
         self.conn.execute_batch("COMMIT")?;

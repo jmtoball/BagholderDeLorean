@@ -25,7 +25,7 @@ const OVERLAY_COLORS: &[&str] = &[
 // ─── Strategy / screen data ───────────────────────────────────────────────────
 
 fn is_preset(id: &str) -> bool {
-    matches!(id, "pairs" | "riskparity" | "sectorrot" | "cycle" | "cramer" | "congress")
+    matches!(id, "pairs" | "riskparity" | "sectorrot" | "cycle")
 }
 fn action_label(id: &str) -> &'static str {
     match id {
@@ -448,15 +448,26 @@ fn App() -> impl IntoView {
             });
         } else {
             let t = ticker.get();
-            let strategy = action_to_strategy(&a);
-            let f  = if a == "golden" { 50 } else { fast.get() };
-            let sl = if a == "golden" { 200 } else { slow.get() };
+            let a = action.get();
             let years = timeframe_years(&timeframe.get());
-            let rsi   = rsi_threshold.get();
-            let url = format!(
-                "/api/backtest?ticker={t}&strategy={strategy}&fast={f}&slow={sl}\
-                 &years={years}&rsi_threshold={rsi}"
-            );
+            let url = if a == "congress" {
+                format!(
+                    "/api/backtest?ticker={t}&strategy=congress_copy_trade&year=2023\
+                     &use_filing_date={}&years={years}",
+                    realistic.get()
+                )
+            } else if a == "cramer" {
+                format!("/api/backtest?ticker={t}&strategy=cramer_inverse&years={years}")
+            } else {
+                let strategy = action_to_strategy(&a);
+                let f  = if a == "golden" { 50 } else { fast.get() };
+                let sl = if a == "golden" { 200 } else { slow.get() };
+                let rsi   = rsi_threshold.get();
+                format!(
+                    "/api/backtest?ticker={t}&strategy={strategy}&fast={f}&slow={sl}\
+                     &years={years}&rsi_threshold={rsi}"
+                )
+            };
             busy.set(true); candidates.set(None);
             spawn_local(async move {
                 single_result.set(Some(get_json::<BacktestResult>(&url).await));
