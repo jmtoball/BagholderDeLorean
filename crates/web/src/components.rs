@@ -503,6 +503,47 @@ pub fn BdSwitch(
     }
 }
 
+// ─── BdCheckbox ──────────────────────────────────────────────────────────────
+// Brand selection box for table rows (ink border, accent fill + check when on).
+// Like BdSwitch, `checked` is static — wrap the call in a reactive closure so a
+// parent signal drives the visual state.
+
+#[component]
+pub fn BdCheckbox(
+    #[prop(default = false)] checked: bool,
+    #[prop(default = false)] disabled: bool,
+    #[prop(optional)]        on_change: Option<Box<dyn Fn(bool) + 'static>>,
+) -> impl IntoView {
+    let box_style = format!(
+        "position:relative;display:inline-flex;align-items:center;justify-content:center;\
+         width:20px;height:20px;flex:none;color:var(--paper-50);\
+         background:{};border:var(--border-line) solid var(--ink-800);\
+         border-radius:var(--radius-sm);box-shadow:var(--shadow-inset);\
+         transition:background var(--dur-fast) var(--ease-out);",
+        if checked { "var(--accent)" } else { "var(--surface-card)" },
+    );
+    view! {
+        <label style=format!(
+            "display:inline-flex;align-items:center;cursor:{};",
+            if disabled { "not-allowed" } else { "pointer" }
+        )>
+            <span style=box_style>
+                <input
+                    type="checkbox"
+                    prop:checked=checked
+                    disabled=disabled
+                    on:change=move |e| { if let Some(ref f) = on_change { f(event_target_checked(&e)); } }
+                    style="position:absolute;inset:0;opacity:0;margin:0;cursor:inherit;"
+                />
+                {checked.then(|| view! {
+                    <span style="font-family:var(--font-body);font-weight:var(--weight-bold);\
+                                 font-size:13px;line-height:1;">"\u{2713}"</span>
+                })}
+            </span>
+        </label>
+    }
+}
+
 // ─── BdTag ───────────────────────────────────────────────────────────────────
 
 #[component]

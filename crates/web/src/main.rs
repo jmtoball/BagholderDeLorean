@@ -11,7 +11,7 @@ use chrono::{Datelike, NaiveDate};
 use leptos::*;
 use serde::de::DeserializeOwned;
 
-use components::{BdBadge, BdButton, BdCallout, BdCard, BdInput, BdSelect, BdStat, BdSwitch, BdTabs, TabItem};
+use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSelect, BdStat, BdSwitch, BdTabs, TabItem};
 
 // ─── Chart geometry ───────────────────────────────────────────────────────────
 const W: f64   = 720.0;
@@ -1091,22 +1091,30 @@ fn App() -> impl IntoView {
 
                         let rows = cands.iter().map(|c| {
                             // Pre-clone all data from c so view! closures are 'static
-                            let t1   = c.ticker.clone();
-                            let t2   = c.ticker.clone();
+                            let t_box = c.ticker.clone();   // checkbox checked read
+                            let t_row = c.ticker.clone();   // row highlight read
                             let tdis = c.ticker.clone();
                             let ind  = c.industry.clone();
                             let pe_s = format!("{:.1}", c.pe);
                             let ipe  = format!("{:.1}", c.industry_median_pe);
                             let rpe  = format!("{:.2}", c.relative_pe);
                             view! {
-                                <tr>
-                                    <td style="padding:11px 6px;">
-                                        <input type="checkbox"
-                                            style="width:16px;height:16px;accent-color:var(--accent);"
-                                            prop:checked=move || selected.with(|s| s.contains(&t1))
-                                            on:change=move |_| selected.update(|s| {
-                                                if !s.remove(&t2) { s.insert(t2.clone()); }
-                                            }) />
+                                <tr style=move || format!(
+                                    "background:{};border-bottom:var(--border-hair) solid var(--border-soft);",
+                                    if selected.with(|s| s.contains(&t_row)) { "var(--surface-sunken)" }
+                                    else { "transparent" }
+                                )>
+                                    <td style="padding:11px 6px;width:34px;">
+                                        {move || {
+                                            let on = selected.with(|s| s.contains(&t_box));
+                                            let t  = t_box.clone();
+                                            view! {
+                                                <BdCheckbox checked=on
+                                                    on_change=Box::new(move |_| selected.update(|s| {
+                                                        if !s.remove(&t) { s.insert(t.clone()); }
+                                                    })) />
+                                            }
+                                        }}
                                     </td>
                                     <td style="padding:11px 6px;font-family:var(--font-mono);font-weight:700;\
                                                font-size:13.5px;color:var(--text-strong);">{tdis}</td>
