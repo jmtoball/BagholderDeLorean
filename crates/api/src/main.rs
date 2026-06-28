@@ -11,7 +11,8 @@ use axum::{
 };
 use bagholder_core::{
     econ_cycle_alloc, inverse_vol_alloc, local_minima, momentum_alloc,
-    pairs_alloc, pe_history, pe_series, run_event_backtest, run_multi_asset_backtest,
+    pairs_alloc, pe_history, pe_series, run_event_backtest, run_signals_backtest, squeeze_signals,
+    run_multi_asset_backtest,
     run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate, CongressTrade,
     CorporateAction, FillCosts, Fundamental, PeHistory, RebalanceConfig, Strategy, SECTOR_ETFS,
 };
@@ -120,6 +121,29 @@ async fn backtest(
         events.sort_by_key(|(d, _)| *d);
         let bars = trim_years(bars, q.years);
         return Ok(Json(run_event_backtest(&bars, &events)));
+    }
+
+    // Short squeeze: high days-to-cover + upward momentum entry.
+    // ponytail: dtc_min=5 and window=20 hardcoded; add query params if users want knobs.
+    if q.strategy == "short_squeeze" {
+        let ticker = q.ticker.clone();
+        let (bars, si) = tokio::task::spawn_blocking(move || {
+            let db = db.lock().unwrap();
+            let bars = db.ohlcv(&ticker)?;
+            let si = db.short_interest(&ticker)?;
+            Ok::<_, anyhow::Error>((bars, si))
+        })
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+
+        let si_events: Vec<(chrono::NaiveDate, f64)> = si
+            .iter()
+            .map(|r| (r.settlement_date, r.days_to_cover))
+            .collect();
+        let bars = trim_years(bars, q.years);
+        let sigs = squeeze_signals(&bars, &si_events, 5.0, 20);
+        return Ok(Json(run_signals_backtest(&bars, &sigs)));
     }
 
     // Congress copy-trade: separate path — uses external disclosure signals.

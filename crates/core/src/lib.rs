@@ -1205,11 +1205,9 @@ pub fn congress_signals(bars: &[Bar], disclosures: &[(NaiveDate, f64)]) -> Vec<f
     signals
 }
 
-/// Run a single-ticker backtest driven by pre-computed event signals.
-/// `events` = `(execution_date, target_weight)` — works for congressional trades,
-/// Cramer call fades, or any dated event-signal source.
-pub fn run_event_backtest(bars: &[Bar], events: &[(NaiveDate, f64)]) -> BacktestResult {
-    let signals = congress_signals(bars, events);
+/// Run a backtest from a pre-computed signal vector (same length as `bars`).
+/// `signals[i]` = position weight applied to bar `i+1`'s return.
+pub fn run_signals_backtest(bars: &[Bar], signals: &[f64]) -> BacktestResult {
     let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
     let mut equity = 1.0f64;
     let mut curve = Vec::with_capacity(bars.len());
@@ -1233,6 +1231,37 @@ pub fn run_event_backtest(bars: &[Bar], events: &[(NaiveDate, f64)]) -> Backtest
         entry_index: None,
         entry_count: None,
     }
+}
+
+/// Run a single-ticker backtest driven by pre-computed event signals.
+/// `events` = `(execution_date, target_weight)` — works for congressional trades,
+/// Cramer call fades, or any dated event-signal source.
+pub fn run_event_backtest(bars: &[Bar], events: &[(NaiveDate, f64)]) -> BacktestResult {
+    run_signals_backtest(bars, &congress_signals(bars, events))
+}
+
+/// Entry when days-to-cover exceeds `dtc_min` AND price is above its `window`-day SMA.
+/// `si` = `(settlement_date, days_to_cover)` sorted ascending by date.
+/// Signal is held until momentum fades (price drops below SMA) — coarse biweekly
+/// re-evaluation of the SI condition matches the FINRA release cadence.
+pub fn squeeze_signals(bars: &[Bar], si: &[(NaiveDate, f64)], dtc_min: f64, window: usize) -> Vec<f64> {
+    let closes: Vec<f64> = bars.iter().map(|b| b.close).collect();
+    let mut signals = vec![0.0f64; bars.len()];
+    let mut current_dtc = 0.0f64;
+    let mut si_idx = 0usize;
+
+    for i in 0..bars.len() {
+        while si_idx < si.len() && si[si_idx].0 <= bars[i].date {
+            current_dtc = si[si_idx].1;
+            si_idx += 1;
+        }
+        if current_dtc < dtc_min || i < window { continue; }
+        let sma = closes[i - window..i].iter().sum::<f64>() / window as f64;
+        if closes[i] > sma {
+            signals[i] = 1.0;
+        }
+    }
+    signals
 }
 
 fn compute_metrics(curve: &[EquityPoint], rets: &[f64]) -> Metrics {
@@ -1817,6 +1846,32 @@ mod tests {
 
         // Two modes produce different signals in bars 20–59 (the lag window).
         assert!(naive[30] != realistic[30], "modes differ in the lag window");
+    }
+
+    #[test]
+    fn squeeze_signals_require_both_conditions() {
+        // 30 bars: price rises steadily from 100.
+        let bars: Vec<Bar> = (0..30)
+            .map(|i| bar(&format!("2022-01-{:02}", i + 1), 100.0 + i as f64))
+            .collect();
+        let window = 10usize;
+
+        // Case A: high DTC (8) + price above SMA → signal after the SMA warms up.
+        let si_high: Vec<(NaiveDate, f64)> = vec![(bars[0].date, 8.0)];
+        let sig = squeeze_signals(&bars, &si_high, 5.0, window);
+        assert_eq!(sig[window - 1], 0.0, "window not yet filled");
+        assert_eq!(sig[window], 1.0, "high DTC + rising price → enter");
+
+        // Case B: low DTC (2) → no entry even with rising price.
+        let si_low: Vec<(NaiveDate, f64)> = vec![(bars[0].date, 2.0)];
+        let sig_low = squeeze_signals(&bars, &si_low, 5.0, window);
+        assert!(sig_low.iter().all(|&s| s == 0.0), "low DTC: never enters");
+
+        // Case C: high DTC starts mid-series (bar 15) → no signal before bar 15.
+        let si_late: Vec<(NaiveDate, f64)> = vec![(bars[15].date, 8.0)];
+        let sig_late = squeeze_signals(&bars, &si_late, 5.0, window);
+        assert_eq!(sig_late[14], 0.0, "SI not yet reported");
+        assert_eq!(sig_late[15], 1.0, "SI reported + above SMA → enter");
     }
 
     #[test]

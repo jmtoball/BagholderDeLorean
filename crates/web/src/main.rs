@@ -38,9 +38,10 @@ fn action_label(id: &str) -> &'static str {
         "riskparity" => "Risk Parity",
         "sectorrot"  => "Momentum Sector Rotation",
         "cycle"      => "Economic-Cycle Rotation",
-        "cramer"     => "Inverse Cramer",
-        "congress"   => "Congressional Copy-Trade",
-        _            => "",
+        "cramer"         => "Inverse Cramer",
+        "congress"       => "Congressional Copy-Trade",
+        "short_squeeze"  => "Short Squeeze",
+        _                => "",
     }
 }
 fn action_rationale(id: &str) -> &'static str {
@@ -54,9 +55,10 @@ fn action_rationale(id: &str) -> &'static str {
         "riskparity" => "A self-contained multi-asset mix weighted by inverse volatility. Boring on purpose.",
         "sectorrot"  => "Rotate into the top-N sectors by trailing return. Selection and action move together.",
         "cycle"      => "Tilt toward the sectors that tend to lead each phase of the macro cycle.",
-        "cramer"     => "Selection is Cramer's picks; the action is to fade them. Inseparable, by design.",
-        "congress"   => "Mirror disclosed politician trades. Naively spectacular — until you wait for the filing date.",
-        _            => "",
+        "cramer"        => "Selection is Cramer's picks; the action is to fade them. Inseparable, by design.",
+        "congress"      => "Mirror disclosed politician trades. Naively spectacular — until you wait for the filing date.",
+        "short_squeeze" => "Enter when short interest is high and price is rising. Exit when momentum fades.",
+        _               => "",
     }
 }
 fn action_to_strategy(id: &str) -> &'static str {
@@ -67,7 +69,7 @@ fn action_to_strategy(id: &str) -> &'static str {
         _                => "buy_and_hold",
     }
 }
-fn is_meme(id: &str) -> bool { matches!(id, "cramer" | "congress") }
+fn is_meme(id: &str) -> bool { matches!(id, "cramer" | "congress" | "short_squeeze") }
 fn timeframe_years(tf: &str) -> u32 {
     match tf { "1y" => 1, "3y" => 3, "5y" => 5, "10y" => 10, _ => 0 }
 }
@@ -458,6 +460,8 @@ fn App() -> impl IntoView {
                 )
             } else if a == "cramer" {
                 format!("/api/backtest?ticker={t}&strategy=cramer_inverse&years={years}")
+            } else if a == "short_squeeze" {
+                format!("/api/backtest?ticker={t}&strategy=short_squeeze&years={years}")
             } else {
                 let strategy = action_to_strategy(&a);
                 let f  = if a == "golden" { 50 } else { fast.get() };
@@ -601,6 +605,7 @@ fn App() -> impl IntoView {
                                             <option value="cycle">"Economic-Cycle Rotation"</option>
                                             <option value="cramer">"Inverse Cramer  ·  meme"</option>
                                             <option value="congress">"Congressional Copy-Trade  ·  meme"</option>
+                                            <option value="short_squeeze">"Short Squeeze  ·  meme"</option>
                                         </optgroup>
                                     </BdSelect>
                                     <div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;">
