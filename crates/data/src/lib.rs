@@ -29,6 +29,13 @@ use serde::Deserialize;
 ///
 /// ponytail: the v8 chart endpoint is undocumented but stable and keyless. If
 /// Yahoo starts rate-limiting bursts, add a small backoff or a paid feed.
+/// Human-facing "no data" message — names the ticker, no URL or HTTP jargon.
+/// Used for both a 404 and an empty/error chart response so the UI shows the
+/// same honest line however Yahoo signals the miss.
+fn no_data_msg(symbol: &str) -> String {
+    format!("Couldn't load data for \"{symbol}\" \u{2014} it may be an unknown or delisted ticker.")
+}
+
 pub fn download_ohlcv(symbol: &str) -> Result<Vec<Bar>> {
     // Explicit period1/period2 over `range=max`: the latter makes Yahoo silently
     // downsample to monthly bars. period1=0 (epoch) pulls full daily history.
@@ -36,19 +43,28 @@ pub fn download_ohlcv(symbol: &str) -> Result<Vec<Bar>> {
         "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}\
          ?period1=0&period2=9999999999&interval=1d"
     );
-    let body = reqwest::blocking::Client::builder()
+    let resp = reqwest::blocking::Client::builder()
         .user_agent("Mozilla/5.0 (compatible; BagholderDeLorean/0.1)")
         .timeout(std::time::Duration::from_secs(20))
         .build()?
         .get(&url)
         .send()
-        .with_context(|| format!("requesting {url}"))?
-        .error_for_status()?
+        // Context names the ticker, not the URL — the raw reqwest error (which
+        // embeds the URL) stays in the source chain, off the Display the API shows.
+        .with_context(|| format!("requesting market data for {symbol}"))?;
+    // Yahoo answers unknown symbols with 404; map it before error_for_status,
+    // whose Display leaks the full URL.
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        anyhow::bail!("{}", no_data_msg(symbol));
+    }
+    let body = resp
+        .error_for_status()
+        .with_context(|| format!("fetching market data for {symbol}"))?
         .text()?;
-    parse_yahoo_chart(&body)
+    parse_yahoo_chart(symbol, &body)
 }
 
-fn parse_yahoo_chart(body: &str) -> Result<Vec<Bar>> {
+fn parse_yahoo_chart(symbol: &str, body: &str) -> Result<Vec<Bar>> {
     #[derive(Deserialize)]
     struct Resp {
         chart: Chart,
@@ -83,14 +99,14 @@ fn parse_yahoo_chart(body: &str) -> Result<Vec<Bar>> {
     }
 
     let resp: Resp = serde_json::from_str(body).context("parsing yahoo chart JSON")?;
-    if let Some(err) = resp.chart.error {
-        anyhow::bail!("yahoo chart error: {err}");
+    if resp.chart.error.is_some() {
+        anyhow::bail!("{}", no_data_msg(symbol));
     }
     let result = resp
         .chart
         .result
         .and_then(|mut rs| rs.pop())
-        .context("yahoo returned no chart result (unknown symbol?)")?;
+        .ok_or_else(|| anyhow::anyhow!("{}", no_data_msg(symbol)))?;
     let ts = result.timestamp.unwrap_or_default();
     let q = result
         .indicators
@@ -420,16 +436,23 @@ mod tests {
                       "low":[6.9,7.0,7.1],"close":[7.1,7.25,null],"volume":[100,120,130]}],
             "adjclose":[{"adjclose":[6.5,6.6,null]}]
           }}]}}"#;
-        let bars = parse_yahoo_chart(json).unwrap();
+        let bars = parse_yahoo_chart("AAPL", json).unwrap();
         assert_eq!(bars.len(), 2);
         assert_eq!(bars[0].date, "2020-01-02".parse::<NaiveDate>().unwrap());
         assert_eq!(bars[1].close, 6.6); // adjusted close, not raw 7.25
     }
 
+
     #[test]
-    fn rejects_unknown_symbol() {
-        let json = r#"{"chart":{"result":null,"error":{"code":"Not Found"}}}"#;
-        assert!(parse_yahoo_chart(json).is_err());
+    fn rejects_unknown_symbol_with_clean_message() {
+        // Yahoo's unknown-symbol shape (null result + error). The message must
+        // name the ticker and leak no URL/host — it surfaces straight to the UI.
+        let json = r#"{"chart":{"result":null,"error":{"code":"Not Found","description":"No data found, symbol may be delisted"}}}"#;
+        let msg = parse_yahoo_chart("XXXXINVALID", json).unwrap_err().to_string();
+        assert!(msg.contains("XXXXINVALID"), "should name the ticker: {msg}");
+        let lower = msg.to_lowercase();
+        assert!(!lower.contains("http"),   "should not leak a URL: {msg}");
+        assert!(!lower.contains("query1"), "should not leak the Yahoo host: {msg}");
     }
 
     #[test]
