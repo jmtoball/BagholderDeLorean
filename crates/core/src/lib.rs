@@ -3,7 +3,13 @@
 //! DTOs (Bar, BacktestResult).
 
 use chrono::NaiveDate;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+// serde_json serializes f64::INFINITY as JSON null (JSON has no infinity literal),
+// so we need a custom deser that maps null → 0.0 for any metric that can be infinite.
+fn deser_f64_or_zero<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    Option::<f64>::deserialize(d).map(|o| o.unwrap_or(0.0))
+}
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -930,11 +936,11 @@ pub struct Metrics {
     pub total_return: f64,
     pub cagr: f64,
     pub max_drawdown: f64,
+    #[serde(deserialize_with = "deser_f64_or_zero", default)]
     pub sharpe: f64,
-    /// Sortino ratio: annualized mean return / annualized downside deviation.
-    /// `f64::INFINITY` when there are no negative returns.
+    #[serde(deserialize_with = "deser_f64_or_zero", default)]
     pub sortino: f64,
-    /// Total return divided by absolute max drawdown. Undefined (0.0) when max_drawdown is 0.
+    #[serde(deserialize_with = "deser_f64_or_zero", default)]
     pub recovery_factor: f64,
 }
 

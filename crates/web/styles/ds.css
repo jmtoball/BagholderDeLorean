@@ -1,0 +1,195 @@
+/* ============================================================
+   BagholderDeLorean — Design System Tokens
+   Aggregated from design_system/tokens/ — edit there, sync here.
+   ============================================================ */
+
+/* ── Colors ─────────────────────────────────────────────────── */
+:root {
+  --teal-900: #1b2f36;
+  --teal-800: #243f47;
+  --teal-700: #2e4a52;
+  --teal-600: #3a5a63;
+  --teal-500: #4a6b74;
+
+  --rust-700: #a4502a;
+  --rust-600: #c0612f;
+  --rust-500: #cd6f3b;
+  --rust-400: #db8a55;
+  --rust-300: #e7a978;
+
+  --denim-700: #36525c;
+  --denim-600: #46626e;
+  --denim-500: #5a7785;
+
+  --paper-50:  #f6f1e4;
+  --paper-100: #efe7d4;
+  --paper-200: #e6dbc2;
+  --paper-300: #d8cab0;
+
+  --ink-900: #141f24;
+  --ink-800: #1c2e34;
+  --ink-700: #2a3d44;
+  --ink-500: #54666d;
+  --ink-300: #8a979c;
+
+  --gain-600: #4f8060;
+  --gain-500: #5e9270;
+  --gain-200: #c4dccb;
+  --loss-600: #b14a40;
+  --loss-500: #c2564a;
+  --loss-200: #e7c5c0;
+  --warn-500: #d4a23c;
+
+  /* Semantic aliases */
+  --surface-page:       var(--paper-100);
+  --surface-card:       var(--paper-50);
+  --surface-sunken:     var(--paper-200);
+  --surface-ink:        var(--teal-700);
+  --surface-ink-raised: var(--teal-600);
+
+  --text-strong:       var(--ink-900);
+  --text-body:         var(--ink-800);
+  --text-muted:        var(--ink-500);
+  --text-faint:        var(--ink-300);
+  --text-on-ink:       var(--paper-50);
+  --text-on-ink-muted: #a9b8bc;
+  --text-on-accent:    var(--paper-50);
+
+  --accent:      var(--rust-600);
+  --accent-hover: var(--rust-700);
+  --accent-soft: var(--rust-300);
+  --accent-glow: var(--rust-400);
+
+  --border-ink:    var(--ink-800);
+  --border-soft:   var(--paper-300);
+  --border-strong: var(--ink-900);
+
+  --gain: var(--gain-500);
+  --loss: var(--loss-500);
+  --warn: var(--warn-500);
+
+  --ring: var(--rust-400);
+}
+
+/* ── Typography ─────────────────────────────────────────────── */
+:root {
+  --font-display: 'Bricolage Grotesque', 'Hanken Grotesk', system-ui, sans-serif;
+  --font-body:    'Hanken Grotesk', system-ui, -apple-system, sans-serif;
+  --font-mono:    'Space Mono', ui-monospace, 'SFMono-Regular', monospace;
+
+  --weight-regular:  400;
+  --weight-medium:   500;
+  --weight-semibold: 600;
+  --weight-bold:     700;
+  --weight-black:    800;
+
+  --text-display-xl: 4.5rem;
+  --text-display-lg: 3.25rem;
+  --text-display-md: 2.5rem;
+  --text-display-sm: 1.875rem;
+  --text-title:      1.375rem;
+  --text-lg:         1.125rem;
+  --text-base:       1rem;
+  --text-sm:         0.875rem;
+  --text-xs:         0.75rem;
+  --text-micro:      0.6875rem;
+
+  --leading-tight:   1.04;
+  --leading-snug:    1.18;
+  --leading-normal:  1.5;
+  --leading-relaxed: 1.62;
+
+  --tracking-tight:    -0.02em;
+  --tracking-normal:    0;
+  --tracking-wide:      0.04em;
+  --tracking-overline:  0.14em;
+}
+
+/* ── Spacing ─────────────────────────────────────────────────── */
+:root {
+  --space-0: 0;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4rem;
+  --space-9: 6rem;
+
+  --container-max: 1200px;
+  --gutter:        1.5rem;
+  --sidebar-w:     248px;
+
+  --control-sm: 34px;
+  --control-md: 42px;
+  --control-lg: 52px;
+}
+
+/* ── Effects ─────────────────────────────────────────────────── */
+:root {
+  --radius-sm:   6px;
+  --radius-md:   10px;
+  --radius-lg:   16px;
+  --radius-xl:   22px;
+  --radius-full: 999px;
+
+  --border-hair: 1px;
+  --border-line: 2px;
+  --border-bold: 3px;
+
+  --shadow-hard-sm:     2px 2px 0 0 var(--ink-800);
+  --shadow-hard:        4px 4px 0 0 var(--ink-800);
+  --shadow-hard-lg:     6px 6px 0 0 var(--ink-800);
+  --shadow-hard-accent: 4px 4px 0 0 var(--rust-700);
+  --shadow-float:       0 10px 30px -8px rgba(20, 31, 36, 0.35);
+  --shadow-inset:       inset 0 2px 0 0 rgba(20, 31, 36, 0.08);
+
+  --ease-out:   cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-lurch: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dur-fast:   120ms;
+  --dur:        180ms;
+  --dur-slow:   320ms;
+}
+
+/* ── Base reset ──────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--text-body);
+  background-color: var(--surface-page);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-snug);
+  letter-spacing: var(--tracking-tight);
+  color: var(--text-strong);
+  margin: 0;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 2px; }
+
+.bd-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.bd-overline {
+  font-family: var(--font-body);
+  font-weight: var(--weight-bold);
+  font-size: var(--text-micro);
+  letter-spacing: var(--tracking-overline);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}

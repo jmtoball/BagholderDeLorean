@@ -30,6 +30,7 @@ pub fn download_ohlcv(symbol: &str) -> Result<Vec<Bar>> {
     );
     let body = reqwest::blocking::Client::builder()
         .user_agent("Mozilla/5.0 (compatible; BagholderDeLorean/0.1)")
+        .timeout(std::time::Duration::from_secs(20))
         .build()?
         .get(&url)
         .send()
@@ -136,6 +137,7 @@ pub fn download_corporate_actions(symbol: &str) -> Result<Vec<CorporateAction>> 
     );
     let body = reqwest::blocking::Client::builder()
         .user_agent("Mozilla/5.0 (compatible; BagholderDeLorean/0.1)")
+        .timeout(std::time::Duration::from_secs(20))
         .build()?
         .get(&url)
         .send()
@@ -204,6 +206,7 @@ pub fn download_fred_series(series_id: &str) -> Result<Vec<(NaiveDate, f64)>> {
     let url = format!("https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}");
     let body = reqwest::blocking::Client::builder()
         .user_agent("Mozilla/5.0 (compatible; BagholderDeLorean/0.1)")
+        .timeout(std::time::Duration::from_secs(30))
         .build()?
         .get(&url)
         .send()
@@ -256,6 +259,7 @@ const METRICS: &[(&str, &[&str])] = &[
 fn sec_get(url: &str) -> Result<String> {
     let body = reqwest::blocking::Client::builder()
         .user_agent(SEC_UA)
+        .timeout(std::time::Duration::from_secs(30))
         .build()?
         .get(url)
         .send()

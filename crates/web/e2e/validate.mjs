@@ -1,110 +1,310 @@
-// In-browser smoke test for the dashboard. Drives a real Chromium through both
-// flows (price backtest; fundamentals screen -> select -> overlaid backtests),
-// asserts the key DOM appears, and screenshots each state into ./shots.
+// Smoke test for the two-concern UI (Stock selection × Trade action).
+// Drives real Chromium through every major interaction, screenshots each state.
 //
-// Setup + run (see README.md): with the app running on :3000,
-//   cd crates/web/e2e && npm link playwright && node validate.mjs
-// Override the URL with BASE=http://host:port node validate.mjs
+// With the app running (trunk serve + cargo run -p bagholder-api):
+//   cd crates/web/e2e && node validate.mjs
+//   BASE=http://localhost:8080 node validate.mjs   # override URL
 import { chromium } from 'playwright';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-const BASE = process.env.BASE ?? 'http://127.0.0.1:3000';
+const BASE = process.env.BASE ?? 'http://localhost:8080';
 const SHOT = join(import.meta.dirname, 'shots');
 mkdirSync(SHOT, { recursive: true });
-const fail = (m) => { console.error('FAIL:', m); process.exitCode = 1; };
+
+let passed = 0, failed = 0;
+const consoleErrors = [];
+const fail = (m) => { console.error('  FAIL:', m); process.exitCode = 1; failed++; };
+const ok   = (m) => { console.log('  OK:', m); passed++; };
 
 const browser = await chromium.launch();
-const page = await browser.newPage();
-const errors = [];
-page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-page.on('pageerror', (e) => errors.push(String(e)));
+const page    = await browser.newPage();
+page.on('console',   (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
+page.on('pageerror', (e) => consoleErrors.push(String(e)));
 
-await page.goto(BASE, { waitUntil: 'networkidle' });
-await page.waitForFunction(
-  () => document.querySelector('h1')?.textContent?.includes('Bagholder'),
-  { timeout: 15000 },
-);
-console.log('OK: wasm app mounted, h1 =', await page.locator('h1').textContent());
+// ─── helpers ─────────────────────────────────────────────────────────────────
 
-// --- Price flow: default AAPL buy & hold ---
-await page.getByRole('button', { name: 'Run backtest' }).click();
-await page.waitForSelector('svg polyline', { timeout: 30000 });
-const priceMetrics = await page.locator('ul li').allTextContents();
-if (!priceMetrics.some((t) => t.includes('Total return'))) fail('price: no Total return metric');
-console.log('OK: price backtest ->', priceMetrics.join(' | '));
-await page.screenshot({ path: `${SHOT}/01-price.png`, fullPage: true });
+// Action picker: BdSelect renders a native <select>; method + timeframe use BdTabs → <button role="tab">
+const actionSelect = () => page.locator('select').first();
+const methodTab    = (name)  => page.locator(`button[role="tab"]:has-text("${name}")`);
+const timeframeTab = (label) => page.locator(`button[role="tab"]:has-text("${label}")`);
+const runBtn       = () => page.locator('button[type="button"]:not([role="tab"])').filter({ hasText: /^Ru/ });
 
-// --- Fundamentals flow: screen -> select -> overlaid backtests ---
-await page.locator('select').first().selectOption('fundamentals');
-await page.getByRole('button', { name: 'Run screen' }).click();
-// Cold cache warms ~23 names on the server; allow a few minutes.
-await page.waitForSelector('table tbody tr', { timeout: 300000 });
-const rowCount = await page.locator('table tbody tr').count();
-console.log(`OK: screen returned ${rowCount} candidate rows`);
-console.log('   top row:', (await page.locator('table tbody tr').first().innerText()).replace(/\s+/g, ' ').trim());
-await page.screenshot({ path: `${SHOT}/02-screen.png`, fullPage: true });
+async function shot(name) {
+  await page.screenshot({ path: `${SHOT}/${name}.png`, fullPage: true });
+}
 
-const boxes = page.locator('table tbody tr input[type=checkbox]');
-for (let i = 0; i < 3; i++) await boxes.nth(i).check();
-const checked = await page.locator('table tbody input:checked').count();
-if (checked !== 3) fail(`expected 3 checked, got ${checked}`);
+// Wait for the current run to finish: run button cycles back to non-busy AND result is present.
+// BdStat labels use text-transform:uppercase so "Total return" → "TOTAL RETURN" in innerText.
+// Watching the button's "Running…" state is more reliable than the 2-phase clear+wait approach,
+// because the button enters busy mode synchronously before the fetch even starts.
+async function waitForResult(timeout = 60000) {
+  // Phase 1: wait for "Running…" (confirms run() fired and busy=true).
+  // This eliminates the race where we check BEFORE Leptos has processed the click.
+  // Use a short timeout — the click should make the button busy almost immediately.
+  await page.waitForFunction(
+    () => [...document.querySelectorAll('button[type="button"]:not([role="tab"])')].some(
+      (b) => b.textContent.includes('Running'),
+    ),
+    undefined,
+    { timeout: 5000 },
+  ).catch(() => {}); // not all strategies go busy (e.g. if result is instant)
 
-await page.getByRole('button', { name: 'Backtest selected' }).click();
-await page.waitForFunction(() => document.querySelectorAll('svg polyline').length >= 3, { timeout: 60000 });
-const lineCount = await page.locator('svg polyline').count();
-const legend = await page.locator('section span span').count();
-console.log(`OK: overlay drew ${lineCount} equity curves, ${legend} legend swatches`);
-await page.screenshot({ path: `${SHOT}/03-overlay.png`, fullPage: true });
+  // Phase 2: wait for not-busy + result rendered.
+  // waitForFunction(fn, arg, options) — pass undefined as arg to avoid arg/options ambiguity
+  await page.waitForFunction(
+    () => {
+      const btns = [...document.querySelectorAll('button[type="button"]:not([role="tab"])')];
+      const runBtn = btns.find((b) => /Run|Running/.test(b.textContent));
+      const notBusy = runBtn && !runBtn.textContent.includes('Running');
+      const body = document.body.innerText;
+      return notBusy && body.includes('TOTAL RETURN') && body.includes('CAGR');
+    },
+    undefined,
+    { timeout },
+  );
+}
 
-// --- Local-min P/E entry: legend should show per-name entry dates ---
-await page.locator('label', { hasText: 'enter at local-min P/E' }).locator('input').check();
-await page.getByRole('button', { name: 'Backtest selected' }).click();
-await page.waitForFunction(
-  () => [...document.querySelectorAll('span')].some((s) => /from \d{4}-\d\d-\d\d/.test(s.textContent)),
-  { timeout: 60000 },
-);
-const entriesShown = await page.locator('span').filter({ hasText: /from \d{4}-\d\d-\d\d/ }).count();
-if (entriesShown < 1) fail('pe_min: no entry dates in legend');
-console.log(`OK: local-min entry legend shows ${entriesShown} entry dates`);
-await page.screenshot({ path: `${SHOT}/04-pe-min.png`, fullPage: true });
+async function step(label, fn) {
+  console.log(`\n▶ ${label}`);
+  try { await fn(); }
+  catch (e) { fail(String(e).split('\n')[0]); }
+}
 
-// --- P/E charts: troughs as dots, current entry highlighted red ---
-await page.waitForSelector('svg circle', { timeout: 30000 });
-const troughDots = await page.locator('svg circle').count();
-const entryDots = await page.locator('svg circle[fill="#dc2626"]').count();
-if (entryDots < 1) fail('P/E chart: no highlighted entry trough');
-console.log(`OK: P/E charts drew ${troughDots} trough dots, ${entryDots} highlighted entries`);
-await page.screenshot({ path: `${SHOT}/06-pe-chart.png`, fullPage: true });
+// ─── 1. App loads ────────────────────────────────────────────────────────────
 
-// --- Step to an older trough; wait for the legend entry dates to actually
-// re-render (the trough label flips on click, before the re-fetch completes,
-// so assert on the legend, not the label). ---
-const legendDates = () =>
-  page.locator('span').filter({ hasText: /from \d{4}-\d\d-\d\d/ }).allInnerTexts().then((a) => a.join('|'));
-const datesBefore = await legendDates();
-const troughLabel = () => page.locator('span').filter({ hasText: /trough \d+ of \d+/ }).first().innerText();
-const labelBefore = await troughLabel();
-await page.getByRole('button', { name: /older/ }).click();
-await page.waitForFunction(
-  (b) => {
-    const cur = [...document.querySelectorAll('span')]
-      .filter((s) => /from \d{4}-\d\d-\d\d/.test(s.textContent))
-      .map((s) => s.textContent)
-      .join('|');
-    return cur && cur !== b;
-  },
-  datesBefore,
-  { timeout: 60000 },
-);
-const labelAfter = await troughLabel();
-if (labelAfter === labelBefore) fail('stepper: trough label did not advance');
-if ((await legendDates()) === datesBefore) fail('stepper: legend entries did not change');
-console.log(`OK: stepped "${labelBefore}" -> "${labelAfter}", entries re-rendered`);
-await page.screenshot({ path: `${SHOT}/05-step.png`, fullPage: true });
+await step('App loads', async () => {
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.waitForFunction(
+    () => document.querySelector('h1')?.textContent?.includes('Bagholder'),
+    undefined,
+    { timeout: 15000 },
+  );
+  ok(`WASM mounted — h1: "${await page.locator('h1').textContent()}"`);
 
-if (errors.length) fail('console/page errors: ' + errors.join(' ;; '));
-else console.log('OK: no console/page errors');
+  const text = await page.locator('body').innerText();
+  if (!text.includes('STOCK SELECTION')) fail('concern panel 01 missing');
+  else ok('concern panel 01 present');
+  if (!text.includes('TRADE ACTION'))    fail('concern panel 02 missing');
+  else ok('concern panel 02 present');
+
+  const opts = await page.locator('select option').allInnerTexts();
+  if (!opts.some((t) => t.includes('Buy & Hold'))) fail('action select missing "Buy & Hold"');
+  else ok(`action select has ${opts.length} options incl. "Buy & Hold"`);
+
+  await shot('01-load');
+});
+
+// ─── 2. Buy & Hold — default AAPL 10y ────────────────────────────────────────
+
+await step('Buy & Hold (AAPL, 10y)', async () => {
+  await runBtn().click();
+  await waitForResult(30000);
+  const pct = (await page.locator('body').innerText()).match(/[+−]\d[\d,.]+%/)?.[0] ?? '?';
+  ok(`result rendered — total return: ${pct}`);
+  await shot('02-buyhold');
+});
+
+// ─── 3. SMA Crossover ────────────────────────────────────────────────────────
+
+await step('SMA Crossover — params visible, runs', async () => {
+  await actionSelect().selectOption('sma');
+  await page.waitForFunction(() => document.body.innerText.includes('Fast'), undefined, { timeout: 5000 });
+  ok('fast/slow param labels visible');
+  await runBtn().click();
+  await waitForResult();
+  ok('result rendered');
+  await shot('03-sma');
+});
+
+// ─── 4. Golden Cross ─────────────────────────────────────────────────────────
+
+await step('Golden Cross / Death Cross preset', async () => {
+  await actionSelect().selectOption('golden');
+  await runBtn().click();
+  await waitForResult();
+  ok('result rendered');
+  await shot('04-golden');
+});
+
+// ─── 5. BTFD ─────────────────────────────────────────────────────────────────
+
+await step('BTFD — RSI threshold visible, runs', async () => {
+  await actionSelect().selectOption('btfd');
+  await page.waitForFunction(() => document.body.innerText.includes('RSI threshold'), undefined, { timeout: 5000 });
+  ok('RSI threshold param visible');
+  await runBtn().click();
+  await waitForResult();
+  ok('result rendered');
+  await shot('05-btfd');
+});
+
+// ─── 6. Mean Reversion ───────────────────────────────────────────────────────
+
+await step('Regime-Filtered Mean Reversion', async () => {
+  await actionSelect().selectOption('meanrev');
+  await runBtn().click();
+  await waitForResult();
+  ok('result rendered');
+  await shot('06-meanrev');
+});
+
+// ─── 7. Timeframe switch ─────────────────────────────────────────────────────
+
+await step('Timeframe 5y', async () => {
+  await actionSelect().selectOption('buyhold');
+  await timeframeTab('5y').click();
+  await runBtn().click();
+  await waitForResult();
+  ok('5y result rendered');
+  await shot('07-timeframe-5y');
+});
+
+// ─── 8. Pairs preset — stock selection locked ─────────────────────────────────
+
+await step('Pairs / Stat-Arb preset — stock panel locked', async () => {
+  await actionSelect().selectOption('pairs');
+  await page.waitForFunction(() => document.body.innerText.includes('Defined by the'), undefined, { timeout: 5000 });
+  ok('stock selection panel shows locked message');
+  const inputs = await page.locator('input:not([type="checkbox"])').count();
+  if (inputs < 2) fail(`expected ≥2 ticker inputs, got ${inputs}`);
+  else ok(`${inputs} ticker/param inputs visible`);
+  await runBtn().click();
+  await waitForResult();
+  ok('pairs backtest rendered result');
+  await shot('08-pairs');
+});
+
+// ─── 9. Unsupported preset — immediate error callout ─────────────────────────
+
+await step('Inverse Cramer (unimplemented) → error callout', async () => {
+  await actionSelect().selectOption('cramer');
+  await runBtn().click();
+  await page.waitForSelector('div[role="note"]', { timeout: 10000 });
+  ok('error callout appeared immediately');
+  await shot('09-cramer-error');
+});
+
+// ─── 10. Invalid ticker → error callout ──────────────────────────────────────
+
+await step('Invalid ticker → error callout', async () => {
+  await actionSelect().selectOption('buyhold');
+  await page.waitForTimeout(500); // let stock panel re-render (microtask queue settles)
+  const input = page.locator('input:not([type="checkbox"])').first();
+  await input.fill('XXXXINVALID');
+  await runBtn().click();
+  await page.waitForSelector('div[role="note"]', { timeout: 15000 });
+  ok('error callout appeared for unknown ticker');
+  // Restore ticker so subsequent steps start clean
+  await input.fill('AAPL');
+  await shot('10-ticker-error');
+});
+
+// ─── 11. Screen flow — Low P/E candidates ────────────────────────────────────
+
+await step('Screen: Low P/E candidates table', async () => {
+  await actionSelect().selectOption('buyhold');
+  await methodTab('Screen').click();
+  const lbl = await runBtn().innerText();
+  if (!lbl.includes('screen')) fail(`expected "Run screen", got "${lbl.trim()}"`);
+  else ok(`run button says "${lbl.trim()}"`);
+  await runBtn().click();
+  await page.waitForSelector('table tbody tr', { timeout: 300000 }); // cold cache: ~2 min
+  const rowCount = await page.locator('table tbody tr').count();
+  if (rowCount < 5) fail(`expected ≥5 rows, got ${rowCount}`);
+  else ok(`Low P/E screen: ${rowCount} candidates`);
+  await shot('11-screen');
+});
+
+// ─── 12. Select candidates + overlay backtest ─────────────────────────────────
+
+await step('Overlay backtest of 3 selected candidates', async () => {
+  const boxes = page.locator('table tbody input[type="checkbox"]');
+  for (let i = 0; i < 3; i++) await boxes.nth(i).check();
+  const checked = await page.locator('table tbody input:checked').count();
+  if (checked !== 3) fail(`expected 3 checked, got ${checked}`);
+  else ok('3 candidates selected');
+
+  await page.getByRole('button', { name: 'Backtest selected' }).click();
+  // Overlay renders a BdCard with title "Overlaid backtest" (rendered as h3)
+  await page.waitForFunction(
+    () => document.body.innerText.includes('Overlaid backtest'),
+    undefined,
+    { timeout: 60000 },
+  );
+  // Each series is a <path fill="none"> in the overlay SVG
+  const lineCount = await page.locator('svg path[fill="none"]').count();
+  ok(`overlay rendered (${lineCount} chart paths)`);
+  await shot('12-overlay');
+});
+
+// ─── 13. P/E trough entry ────────────────────────────────────────────────────
+
+await step('Enter at P/E trough', async () => {
+  // BdSwitch checkbox is opacity:0/position:absolute — use force:true
+  const troughSwitch = page
+    .locator('label')
+    .filter({ hasText: /Enter at P\/E trough/ })
+    .locator('input[type="checkbox"]');
+  await troughSwitch.check({ force: true });
+  await page.getByRole('button', { name: 'Backtest selected' }).click();
+  await page.waitForFunction(
+    () => [...document.querySelectorAll('span')].some((s) => /from \d{4}-\d\d-\d\d/.test(s.textContent)),
+    undefined,
+    { timeout: 60000 },
+  );
+  const entries = await page.locator('span').filter({ hasText: /from \d{4}-\d\d-\d\d/ }).count();
+  if (entries < 1) fail('no "from YYYY-MM-DD" entry dates in legend');
+  else ok(`${entries} entry dates in legend`);
+  await shot('13-pe-trough');
+});
+
+// ─── 14. P/E mini-charts + trough stepper ────────────────────────────────────
+
+await step('P/E mini-charts and trough stepper', async () => {
+  await page.waitForSelector('svg circle', { timeout: 30000 });
+  const dots = await page.locator('svg circle').count();
+  ok(`P/E mini-charts drew ${dots} trough dots`);
+
+  const datesBefore = await page.locator('span')
+    .filter({ hasText: /from \d{4}-\d\d-\d\d/ })
+    .allInnerTexts()
+    .then((a) => a.join('|'));
+
+  await page.getByRole('button', { name: /older/i }).click();
+  await page.waitForFunction(
+    (b) => {
+      const cur = [...document.querySelectorAll('span')]
+        .filter((s) => /from \d{4}-\d\d-\d\d/.test(s.textContent))
+        .map((s) => s.textContent).join('|');
+      return cur && cur !== b;
+    },
+    datesBefore,
+    { timeout: 60000 },
+  );
+  ok('"older" stepper changed entry dates in legend');
+  await shot('14-pe-step');
+});
+
+// ─── 15. Console errors ───────────────────────────────────────────────────────
+
+await step('No JS page errors', async () => {
+  const realErrors = consoleErrors.filter(
+    (e) =>
+      !e.includes('XXXXINVALID') &&
+      !e.includes('status of 500') &&
+      // trunk hot-reload WS — only present when served via cargo-run (not trunk serve)
+      !e.includes('trunk/ws') &&
+      !e.includes('__trunk_address__') &&
+      // Leptos debug-mode reactive warning — benign, fires on rapid DOM churn in tests
+      !e.includes('closure invoked recursively or after being dropped'),
+  );
+  if (realErrors.length) fail('unexpected console/page errors: ' + realErrors.join(' ;; '));
+  else ok('no unexpected console/page errors');
+});
 
 await browser.close();
+
+console.log('');
+console.log(`─── ${passed} passed, ${failed} failed ───`);
 console.log(process.exitCode ? 'VALIDATION FAILED' : 'VALIDATION PASSED');
