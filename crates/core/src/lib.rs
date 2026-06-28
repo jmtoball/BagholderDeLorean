@@ -881,7 +881,7 @@ pub fn run_multi_asset_backtest(
                 curve: vec![],
                 metrics: compute_metrics(&[], &[]),
                 positions: vec![], trades: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-                initial_amount: 10_000.0, final_value: 0.0,
+                initial_amount: 10_000.0, final_value: 0.0, benchmark: None,
             },
         };
         let common = iter.fold(first, |acc, bars| {
@@ -929,7 +929,7 @@ pub fn run_multi_asset_backtest(
     let metrics = compute_metrics(&curve, &rets);
     // ponytail: positions left empty for multi-asset; add per-ticker summary when UI needs it.
     BacktestResult { curve, metrics, positions: vec![], trades: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-        initial_amount: 10_000.0, final_value: 0.0, }
+        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, }
 }
 
 /// 20-day trailing average daily volume at bar index `i` (excludes bar `i`).
@@ -1027,6 +1027,9 @@ pub struct BacktestResult {
     /// Final portfolio value = `initial_amount × curve.last().equity`.
     #[serde(default)]
     pub final_value: f64,
+    /// Optional comparison run (buy-and-hold SPY by default). Boxed to avoid infinite type size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark: Option<Box<BacktestResult>>,
 }
 
 fn default_initial_amount() -> f64 { 10_000.0 }
@@ -1072,6 +1075,7 @@ pub fn run_backtest(bars: &[Bar], strategy: &Strategy) -> BacktestResult {
         entry_count: None,
         initial_amount: 10_000.0,
         final_value: 0.0,
+        benchmark: None,
     }
 }
 
@@ -1160,7 +1164,7 @@ pub fn run_portfolio_backtest(
     }];
 
     BacktestResult { curve, metrics, positions, trades, entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-        initial_amount: 10_000.0, final_value: 0.0, }
+        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, }
 }
 
 /// Point-in-time trailing P/E for each bar: `close / TTM EPS`, where TTM EPS is
@@ -1305,6 +1309,7 @@ pub fn run_signals_backtest(ticker: &str, bars: &[Bar], signals: &[f64]) -> Back
         entry_count: None,
         initial_amount: 10_000.0,
         final_value: 0.0,
+        benchmark: None,
     }
 }
 

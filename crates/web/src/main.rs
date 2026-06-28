@@ -227,6 +227,35 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     let hs   = format!("{H}");
     let sw   = format!("width:16px;height:3px;background:{color};border-radius:2px;");
 
+    let bench_view = r.benchmark.as_ref().map(|b| {
+        let b_cagr   = format!("{} /yr", fmt_pct(b.metrics.cagr));
+        let b_mdd    = fmt_pct(b.metrics.max_drawdown);
+        let b_sharpe = format!("{:.2}", b.metrics.sharpe);
+        let b_ret    = fmt_pct(b.metrics.total_return);
+        let b_final  = fmt_money(b.final_value);
+        let b_tone   = if b.metrics.total_return >= 0.0 { "gain" } else { "loss" };
+        view! {
+            <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;">
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Bench. value".to_string() value=b_final size="sm".to_string() />
+                </BdCard>
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Bench. return".to_string() value=b_ret size="sm".to_string()
+                        delta_tone=b_tone.to_string() />
+                </BdCard>
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Bench. CAGR".to_string() value=b_cagr size="sm".to_string() />
+                </BdCard>
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Bench. MDD".to_string() value=b_mdd size="sm".to_string() />
+                </BdCard>
+                <BdCard padding="16px".to_string()>
+                    <BdStat label="Bench. Sharpe".to_string() value=b_sharpe size="sm".to_string() />
+                </BdCard>
+            </div>
+        }
+    });
+
     let has_trades = r.trades.len() > 1;
     let trade_count = r.trades.len();
     let trade_title = format!("{} {}", trade_count, if trade_count == 1 { "fill" } else { "fills" });
@@ -239,6 +268,7 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
 
     view! {
         <div style="display:flex;flex-direction:column;gap:16px;">
+            {bench_view}
             <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;">
                 <BdCard padding="16px".to_string()>
                     <BdStat label="Final value".to_string() value=final_str size="sm".to_string() />
@@ -502,7 +532,10 @@ fn App() -> impl IntoView {
     let entry_z       = create_rw_signal(2.0f64);
     let top_n         = create_rw_signal(3usize);
     let realistic     = create_rw_signal(false);
-    let initial_amount = create_rw_signal(10_000.0f64);
+    let initial_amount     = create_rw_signal(10_000.0f64);
+    let benchmark_ticker   = create_rw_signal("SPY".to_string());
+    let benchmark_strategy = create_rw_signal("buy_and_hold".to_string());
+    let show_benchmark     = create_rw_signal(false);
 
     // Fetch universe once on mount for datalist autocomplete.
     let universe = create_resource(
@@ -562,16 +595,21 @@ fn App() -> impl IntoView {
             let a = action.get();
             let years = timeframe_years(&timeframe.get());
             let amt = initial_amount.get();
+            let bench_suffix = if show_benchmark.get() {
+                let bt = benchmark_ticker.get();
+                let bs = benchmark_strategy.get();
+                format!("&benchmark_ticker={bt}&benchmark_strategy={bs}")
+            } else { String::new() };
             let url = if a == "congress" {
                 format!(
                     "/api/backtest?ticker={t}&strategy=congress_copy_trade&year=2023\
-                     &use_filing_date={}&years={years}&initial_amount={amt}",
+                     &use_filing_date={}&years={years}&initial_amount={amt}{bench_suffix}",
                     realistic.get()
                 )
             } else if a == "cramer" {
-                format!("/api/backtest?ticker={t}&strategy=cramer_inverse&years={years}&initial_amount={amt}")
+                format!("/api/backtest?ticker={t}&strategy=cramer_inverse&years={years}&initial_amount={amt}{bench_suffix}")
             } else if a == "short_squeeze" {
-                format!("/api/backtest?ticker={t}&strategy=short_squeeze&years={years}&initial_amount={amt}")
+                format!("/api/backtest?ticker={t}&strategy=short_squeeze&years={years}&initial_amount={amt}{bench_suffix}")
             } else {
                 let strategy = action_to_strategy(&a);
                 let f  = if a == "golden" { 50 } else { fast.get() };
@@ -579,7 +617,7 @@ fn App() -> impl IntoView {
                 let rsi   = rsi_threshold.get();
                 format!(
                     "/api/backtest?ticker={t}&strategy={strategy}&fast={f}&slow={sl}\
-                     &years={years}&rsi_threshold={rsi}&initial_amount={amt}"
+                     &years={years}&rsi_threshold={rsi}&initial_amount={amt}{bench_suffix}"
                 )
             };
             busy.set(true); candidates.set(None);
@@ -866,6 +904,40 @@ fn App() -> impl IntoView {
                                         }
                                     }) />
                             </div>
+                            // Benchmark toggle + fields
+                            <div style="flex:0 1 auto;display:flex;flex-direction:column;gap:9px;">
+                                <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
+                                    <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"Benchmark"</span>
+                                </div>
+                                <BdSwitch checked=show_benchmark.get()
+                                    on_change=Box::new(move |v| show_benchmark.set(v))
+                                    label="Compare vs.".to_string() />
+                            </div>
+                            {move || show_benchmark.get().then(|| view! {
+                                <div style="flex:0 1 120px;min-width:90px;display:flex;flex-direction:column;gap:9px;">
+                                    <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
+                                        <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"vs. Ticker"</span>
+                                    </div>
+                                    <BdInput mono=true placeholder="SPY".to_string()
+                                        value=benchmark_ticker.get()
+                                        on_input=Box::new(move |v| benchmark_ticker.set(v.trim().to_uppercase())) />
+                                </div>
+                                <div style="flex:0 1 200px;min-width:160px;display:flex;flex-direction:column;gap:9px;">
+                                    <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
+                                        <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"vs. Strategy"</span>
+                                    </div>
+                                    <select
+                                        style="height:var(--control-md);border:var(--border-line) solid var(--ink-800);border-radius:var(--radius-md);background:var(--paper-100);color:var(--text-strong);font-size:var(--text-base);padding:0 12px;cursor:pointer;"
+                                        on:change=move |e| {
+                                            use leptos::ev::Event;
+                                            let v = leptos::event_target_value(&e);
+                                            benchmark_strategy.set(v);
+                                        }>
+                                        <option value="buy_and_hold">"Buy and Hold"</option>
+                                        <option value="sma_crossover">"SMA Crossover (20/50)"</option>
+                                    </select>
+                                </div>
+                            })}
                             <div style="flex:1 1 280px;min-width:200px;display:flex;flex-direction:column;gap:9px;">
                                 <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
                                     <span style="font-family:var(--font-mono);font-weight:700;font-size:11px;color:var(--accent);">{step}</span>

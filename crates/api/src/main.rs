@@ -52,6 +52,10 @@ struct BacktestQuery {
     bb_std: Option<f64>,
     /// Initial investment in dollars; defaults to $10 000.
     initial_amount: Option<f64>,
+    /// Benchmark ticker to run a comparison backtest against (default: no benchmark).
+    benchmark_ticker: Option<String>,
+    /// Benchmark strategy string (default: "buy_and_hold").
+    benchmark_strategy: Option<String>,
 }
 
 fn default_strategy() -> String {
@@ -194,9 +198,10 @@ async fn backtest(
 
     let ticker = q.ticker.clone();
     let pe_min = q.entry.as_deref() == Some("pe_min");
+    let db_main = db.clone();
     // Blocking DB + network I/O must not run on the async runtime's workers.
     let (bars, eps, actions) = tokio::task::spawn_blocking(move || {
-        let db = db.lock().unwrap();
+        let db = db_main.lock().unwrap();
         let bars = db.ohlcv(&ticker)?;
         // Only the fundamentals fetch is conditional — skip it for plain runs.
         let eps = if pe_min {
@@ -212,7 +217,10 @@ async fn backtest(
     .map_err(internal)?;
 
     let amount = q.initial_amount.unwrap_or(10_000.0);
-    if pe_min {
+    let bench_ticker  = q.benchmark_ticker.clone();
+    let bench_strat   = q.benchmark_strategy.clone();
+    let years         = q.years;
+    let mut result = if pe_min {
         let series = pe_series(&bars, &eps);
         let window = q.pe_window.unwrap_or(63);
         let minima = local_minima(&series, window);
@@ -220,20 +228,19 @@ async fn backtest(
             return Err((StatusCode::UNPROCESSABLE_ENTITY,
                 "no P/E history to find a minimum (missing EPS?)".into()));
         }
-        // Step back from the most recent trough; clamp to what's available.
         let count = minima.len();
         let k = q.pe_index.unwrap_or(0).min(count - 1);
         let (entry_date, entry_pe) = series[minima[count - 1 - k]];
         let trimmed: Vec<Bar> = bars.into_iter().filter(|b| b.date >= entry_date).collect();
-        let mut result = run_portfolio_backtest(&q.ticker, &trimmed, &strategy, amount, &FillCosts::ZERO, 0.0, &actions)
+        let mut r = run_portfolio_backtest(&q.ticker, &trimmed, &strategy, amount, &FillCosts::ZERO, 0.0, &actions)
             .with_amount(amount);
-        result.entry_date = Some(entry_date);
-        result.entry_pe = Some(entry_pe);
-        result.entry_index = Some(k);
-        result.entry_count = Some(count);
-        Ok(Json(result))
+        r.entry_date = Some(entry_date);
+        r.entry_pe = Some(entry_pe);
+        r.entry_index = Some(k);
+        r.entry_count = Some(count);
+        r
     } else {
-        Ok(Json(run_portfolio_backtest(
+        run_portfolio_backtest(
             &q.ticker,
             &trim_years(bars, q.years),
             &strategy,
@@ -241,8 +248,40 @@ async fn backtest(
             &FillCosts::ZERO,
             0.0,
             &actions,
-        ).with_amount(amount)))
+        ).with_amount(amount)
+    };
+
+    // Optional benchmark run — a second buy-and-hold (or configured strategy) on a separate ticker.
+    if let Some(bt) = bench_ticker {
+        let db2 = db.clone();
+        let bt2 = bt.clone();
+        let bench_result = tokio::task::spawn_blocking(move || {
+            let db = db2.lock().unwrap();
+            let bars = db.ohlcv(&bt2)?;
+            let actions: Vec<CorporateAction> = db.corporate_actions(&bt2)?;
+            Ok::<_, anyhow::Error>((bars, actions))
+        })
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+        let (bench_bars, bench_actions) = bench_result;
+        let bench_strategy = match bench_strat.as_deref().unwrap_or("buy_and_hold") {
+            "sma_crossover" => Strategy::SmaCrossover { fast: 20, slow: 50 },
+            _ => Strategy::BuyAndHold,
+        };
+        let b = run_portfolio_backtest(
+            &bt,
+            &trim_years(bench_bars, years),
+            &bench_strategy,
+            amount,
+            &FillCosts::ZERO,
+            0.0,
+            &bench_actions,
+        ).with_amount(amount);
+        result.benchmark = Some(Box::new(b));
     }
+
+    Ok(Json(result))
 }
 
 #[derive(Deserialize)]
