@@ -401,6 +401,12 @@ fn App() -> impl IntoView {
     let top_n         = create_rw_signal(3usize);
     let realistic     = create_rw_signal(false);
 
+    // Fetch universe once on mount for datalist autocomplete.
+    let universe = create_resource(
+        || (),
+        |_| async { get_json::<Vec<String>>("/api/universe").await.unwrap_or_default() },
+    );
+
     let busy          = create_rw_signal(false);
     let single_result = create_rw_signal::<Option<Result<BacktestResult, String>>>(None);
     let candidates    = create_rw_signal::<Option<Result<Vec<Candidate>, String>>>(None);
@@ -540,6 +546,13 @@ fn App() -> impl IntoView {
         <main style="max-width:820px;margin:2rem auto;padding:0 var(--gutter);\
                      display:flex;flex-direction:column;gap:28px;">
 
+            // Datalist for ticker autocomplete — populated from /api/universe.
+            {move || universe.get().map(|tickers| view! {
+                <datalist id="tickers">
+                    {tickers.into_iter().map(|t| view! { <option value=t /> }).collect_view()}
+                </datalist>
+            })}
+
             <section style="display:flex;flex-direction:column;gap:16px;">
 
                 // ── Two concern panels ────────────────────────────────────────
@@ -585,6 +598,7 @@ fn App() -> impl IntoView {
                                                 view! {
                                                     <BdInput mono=true placeholder="AAPL".to_string()
                                                         value=ticker.get_untracked()
+                                                        list="tickers".to_string()
                                                         on_input=Box::new(move |v| ticker.set(v.to_uppercase())) />
                                                 }.into_view()
                                             }}

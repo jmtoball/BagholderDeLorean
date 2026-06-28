@@ -272,6 +272,7 @@ pub fn BdInput(
     #[prop(default = false)]         mono: bool,
     #[prop(default = String::new())] value: String,
     #[prop(optional)]                placeholder: Option<String>,
+    #[prop(optional)]                list: Option<String>,
     #[prop(optional)]                on_input: Option<Box<dyn Fn(String) + 'static>>,
 ) -> impl IntoView {
     let (focused, set_focused) = create_signal(false);
@@ -308,6 +309,7 @@ pub fn BdInput(
                 <input
                     prop:value=value
                     placeholder=placeholder.unwrap_or_default()
+                    list=list.unwrap_or_default()
                     style=input_style
                     on:focus=move |_| set_focused.set(true)
                     on:blur=move |_| set_focused.set(false)
