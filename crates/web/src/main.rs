@@ -12,7 +12,7 @@ pub mod components;
 
 use std::collections::{HashMap, HashSet};
 
-use bagholder_core::{BacktestResult, Candidate, PeHistory, TradeEvent};
+use bagholder_core::{BacktestResult, Candidate, EquityPoint, PeHistory, TaxSystem, TradeEvent};
 use chrono::{Datelike, NaiveDate};
 use leptos::*;
 use serde::de::DeserializeOwned;
@@ -80,6 +80,19 @@ fn timeframe_years(tf: &str) -> u32 {
     match tf { "1y" => 1, "3y" => 3, "5y" => 5, "10y" => 10, _ => 0 }
 }
 
+/// Build the `&tax_*` query suffix for the backtest URL. Empty for "none";
+/// otherwise carries the active system's knobs.
+fn tax_query(system: &str, income: f64, church: bool, allowance: f64, estimate: bool, teilfrei: f64, vorab: bool) -> String {
+    match system {
+        "us" => format!("&tax=us&tax_income={income}"),
+        "de" => format!(
+            "&tax=de&tax_church={church}&tax_allowance={allowance}\
+             &tax_estimate={estimate}&tax_teilfrei={teilfrei}&tax_vorab={vorab}"
+        ),
+        _ => String::new(),
+    }
+}
+
 // ─── Formatting ───────────────────────────────────────────────────────────────
 
 fn fmt_pct(x: f64) -> String {
@@ -118,6 +131,18 @@ fn svg_path(pts: &[(f64, f64)]) -> String {
     pts.iter().enumerate()
         .map(|(i, (x, y))| format!("{}{:.1},{:.1}", if i == 0 { "M" } else { " L" }, x, y))
         .collect()
+}
+
+/// Map a curve to chart points against explicit shared bounds, so two curves
+/// (after-tax vs pre-tax) can be overlaid on one scale.
+fn pts_with_bounds(curve: &[EquityPoint], dmin: i32, dmax: i32, ymin: f64, ymax: f64) -> Vec<(f64, f64)> {
+    let dspan = (dmax - dmin).max(1) as f64;
+    let yspan = (ymax - ymin).max(1e-9);
+    curve.iter().map(|p| {
+        let x = PAD + (p.date.num_days_from_ce() - dmin) as f64 / dspan * (W - PAD * 2.0);
+        let y = PAD + (1.0 - (p.equity - ymin) / yspan) * (H - PAD * 2.0);
+        (x, y)
+    }).collect()
 }
 
 fn to_pts(result: &BacktestResult) -> Option<Vec<(f64, f64)>> {
@@ -209,11 +234,33 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     let Some(pts) = to_pts(r) else {
         return view! { <p style="color:var(--text-on-ink-muted);">"Not enough history to chart this one."</p> }.into_view();
     };
-    let line = svg_path(&pts);
-    let (fx, _) = pts[0];
-    let (lx, _) = *pts.last().unwrap();
-    let h_bot   = format!("{:.1}", H - PAD);
-    let area    = format!("{} L{:.1},{h_bot} L{:.1},{h_bot} Z", line, lx, fx);
+    // After-tax line; when a pre-tax baseline is attached (tax active), plot both
+    // on one shared scale so the tax drag reads as the gap between the lines.
+    let (line, area, pretax_path) = {
+        let pre = r.pretax.as_ref().filter(|p| p.curve.len() >= 2);
+        let (after_pts, pre_path) = if let Some(p) = pre {
+            let (mut dmin, mut dmax) = (i32::MAX, i32::MIN);
+            let (mut ymin, mut ymax) = (f64::MAX, f64::MIN_POSITIVE);
+            for c in [&r.curve, &p.curve] {
+                for pt in c.iter() {
+                    let d = pt.date.num_days_from_ce();
+                    dmin = dmin.min(d); dmax = dmax.max(d);
+                    ymin = ymin.min(pt.equity); ymax = ymax.max(pt.equity);
+                }
+            }
+            let after = pts_with_bounds(&r.curve, dmin, dmax, ymin, ymax);
+            let prep = svg_path(&pts_with_bounds(&p.curve, dmin, dmax, ymin, ymax));
+            (after, Some(prep))
+        } else {
+            (pts.clone(), None)
+        };
+        let l = svg_path(&after_pts);
+        let (fx, _) = after_pts[0];
+        let (lx, _) = *after_pts.last().unwrap();
+        let h_bot = format!("{:.1}", H - PAD);
+        let a = format!("{} L{:.1},{h_bot} L{:.1},{h_bot} Z", l, lx, fx);
+        (l, a, pre_path)
+    };
 
     let win          = r.metrics.total_return >= 0.0;
     let color        = if win { "var(--gain-200)" } else { "var(--loss-200)" };
@@ -292,6 +339,97 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     let row_style   = format!("display:grid;grid-template-columns:{equity_col}{};gap:18px;align-items:start;",
                               if has_trades { " minmax(300px,1fr)" } else { "" });
 
+    // ── Tax: after-tax-vs-pre-tax pairing + per-year drag (F6) ─────────────
+    let tax_active = r.tax_system != TaxSystem::None;
+    let sys_label = match r.tax_system {
+        TaxSystem::UsFederal => "U.S. federal",
+        TaxSystem::Germany => "German",
+        TaxSystem::None => "",
+    };
+    let tax_view = tax_active.then(|| {
+        let after_final = fmt_money(r.final_value);
+        let after_cagr  = format!("{} /yr", fmt_pct(r.metrics.cagr));
+        let total_tax_s = fmt_money(r.total_tax);
+        let (pre_final, pre_cagr) = r.pretax.as_ref()
+            .map(|p| (fmt_money(p.final_value), format!("{} /yr", fmt_pct(p.metrics.cagr))))
+            .unwrap_or_else(|| ("—".to_string(), "—".to_string()));
+        let eff = r.pretax.as_ref().map(|p| {
+            let g = p.final_value - r.initial_amount;
+            if g > 0.0 { r.total_tax / g } else { 0.0 }
+        }).unwrap_or(0.0);
+        let eff_s = format!("{:.1}%", eff * 100.0);
+
+        // Paired after-tax / pre-tax stat. After-tax is the headline; the pre-tax
+        // twin sits below struck through.
+        let paired = |label: &str, after: String, pre: String| {
+            let l = label.to_string();
+            view! {
+                <BdCard padding="16px".to_string()>
+                    <div style="display:flex;flex-direction:column;gap:5px;">
+                        <span style="font-weight:700;font-size:var(--text-micro);letter-spacing:var(--tracking-overline);text-transform:uppercase;color:var(--text-muted);">{l}</span>
+                        <span style="font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-weight:700;font-size:var(--text-title);line-height:1;color:var(--text-strong);">{after}</span>
+                        <span style="font-family:var(--font-mono);font-size:11.5px;color:var(--text-faint);text-decoration:line-through;">{pre}</span>
+                    </div>
+                </BdCard>
+            }
+        };
+
+        // Per-year tax drag.
+        let max_tax = r.tax_per_year.iter().map(|y| y.tax).fold(1.0_f64, f64::max);
+        let drag_rows: Vec<_> = r.tax_per_year.iter().map(|y| {
+            let w = format!("{:.0}%", (y.tax / max_tax * 100.0).clamp(0.0, 100.0));
+            let bar_style = format!("height:10px;background:var(--loss);border-radius:2px;width:{w};");
+            let yr = y.year.to_string();
+            let gain_s = format!("{} gain", fmt_money(y.gain));
+            let tax_s = if y.tax > 0.0 { fmt_money(-y.tax) } else { "$0".to_string() };
+            let tax_color = if y.tax > 0.0 { "var(--loss)" } else { "var(--text-faint)" };
+            let tax_style = format!("font-family:var(--font-mono);font-weight:700;font-size:13px;text-align:right;color:{tax_color};");
+            view! {
+                <div style="display:grid;grid-template-columns:48px 1fr 92px;align-items:center;gap:12px;padding:7px 4px;border-bottom:1px solid var(--border-soft);">
+                    <span style="font-family:var(--font-mono);font-weight:700;font-size:12.5px;color:var(--text-strong);">{yr}</span>
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        <div style="flex:1;height:10px;background:var(--surface-sunken);border:1px solid var(--border-soft);border-radius:3px;overflow:hidden;">
+                            <div style=bar_style />
+                        </div>
+                        <span style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted);white-space:nowrap;">{gain_s}</span>
+                    </div>
+                    <span style=tax_style>{tax_s}</span>
+                </div>
+            }
+        }).collect();
+        let drag_panel = (!r.tax_per_year.is_empty()).then(|| view! {
+            <BdCard overline="Per-year tax drag".to_string() title="What the taxman took, by year".to_string()>
+                <div style="margin-top:8px;max-height:268px;overflow-y:auto;">{drag_rows}</div>
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;padding-top:10px;border-top:var(--border-line) solid var(--ink-900);">
+                    <span style="font-size:12px;color:var(--text-muted);">"Effective tax on gains"</span>
+                    <span style="font-family:var(--font-mono);font-weight:700;font-size:14px;color:var(--text-strong);">{eff_s}</span>
+                </div>
+            </BdCard>
+        });
+
+        view! {
+            <div style="display:flex;flex-direction:column;gap:var(--space-3);padding:16px;background:var(--surface-sunken);border:var(--border-line) solid var(--ink-900);border-radius:var(--radius-lg);">
+                <span style="font-weight:700;font-size:var(--text-micro);letter-spacing:var(--tracking-overline);text-transform:uppercase;color:var(--accent);">
+                    {format!("{sys_label} tax · what you actually keep")}
+                </span>
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:var(--space-3);">
+                    {paired("After-tax value", after_final, pre_final)}
+                    {paired("After-tax CAGR", after_cagr, pre_cagr)}
+                    <BdCard padding="16px".to_string()>
+                        <BdStat label="Total tax paid".to_string() value=total_tax_s size="sm".to_string() delta_tone="loss".to_string() />
+                    </BdCard>
+                </div>
+                {drag_panel}
+            </div>
+        }
+    });
+
+    let disclaimer = if tax_active {
+        format!("After {sys_label} tax. Excludes slippage and survivorship bias. Past performance is a vibe, not a promise.")
+    } else {
+        "Excludes taxes, slippage, and survivorship bias. Past performance is a vibe, not a promise.".to_string()
+    };
+
     view! {
         <div style="display:flex;flex-direction:column;gap:var(--space-4);">
             {bench_view}
@@ -319,6 +457,8 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                 </BdCard>
             </div>
 
+            {tax_view}
+
             <div style=row_style>
             <BdCard tone="dark".to_string() overline=card_ol title=card_title>
                 <div style="position:absolute;top:16px;right:16px;">
@@ -340,14 +480,23 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                         <line x1=x1s x2=x2s y1=gy3.clone() y2=gy3
                               stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
                         <path d=area fill="url(#bd_eq_grad)" />
+                        {pretax_path.clone().map(|d| view! {
+                            <path d=d fill="none" stroke="var(--text-on-ink-muted)" stroke-width="1.5"
+                                  stroke-dasharray="4 4" stroke-linejoin="round" opacity="0.7" />
+                        })}
                         <path d=line fill="none" stroke=color stroke-width="2.5"
                               stroke-linejoin="round" stroke-linecap="round" />
                     </svg>
                     <div style="display:flex;gap:18px;margin-top:var(--space-3);font-size:var(--text-xs);\
                                 color:var(--text-on-ink-muted);font-family:var(--font-mono);">
                         <span style="display:inline-flex;align-items:center;gap:7px;">
-                            <span style=sw />"Strategy"
+                            <span style=sw />{if pretax_path.is_some() { "After tax" } else { "Strategy" }}
                         </span>
+                        {pretax_path.is_some().then(|| view! {
+                            <span style="display:inline-flex;align-items:center;gap:7px;">
+                                <span style="width:16px;height:0;border-top:2px dashed var(--text-on-ink-muted);" />"Pre-tax"
+                            </span>
+                        })}
                     </div>
                 </div>
             </BdCard>
@@ -389,8 +538,7 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
 
             <p style="font-family:var(--font-mono);font-size:11.5px;\
                       color:var(--text-faint);margin:2px 0 0;text-align:center;">
-                "Excludes taxes, slippage, and survivorship bias. \
-                 Past performance is a vibe, not a promise."
+                {disclaimer}
             </p>
         </div>
     }
@@ -593,6 +741,14 @@ fn App() -> impl IntoView {
     let benchmark_ticker   = create_rw_signal("SPY".to_string());
     let benchmark_strategy = create_rw_signal("buy_and_hold".to_string());
     let show_benchmark     = create_rw_signal(false);
+    // Tax configurator state (F6). system: "none" | "us" | "de".
+    let tax_system     = create_rw_signal("none".to_string());
+    let tax_income     = create_rw_signal(96_000.0f64);
+    let tax_church     = create_rw_signal(false);
+    let tax_allowance  = create_rw_signal(1_000.0f64);
+    let tax_estimate   = create_rw_signal(false);
+    let tax_teilfrei   = create_rw_signal(30.0f64);
+    let tax_vorab      = create_rw_signal(true);
 
     // Fetch universe once on mount for datalist autocomplete.
     let universe = create_resource(
@@ -657,6 +813,11 @@ fn App() -> impl IntoView {
                 let bs = benchmark_strategy.get();
                 format!("&benchmark_ticker={bt}&benchmark_strategy={bs}")
             } else { String::new() };
+            let tax_suffix = tax_query(
+                &tax_system.get(), tax_income.get(), tax_church.get(), tax_allowance.get(),
+                tax_estimate.get(), tax_teilfrei.get(), tax_vorab.get(),
+            );
+            let bench_suffix = format!("{bench_suffix}{tax_suffix}");
             let url = if a == "congress" {
                 format!(
                     "/api/backtest?ticker={t}&strategy=congress_copy_trade&year=2023\
@@ -1017,6 +1178,7 @@ fn App() -> impl IntoView {
                     let scr      = sel_method.get() == "screen" && !prst;
                     let is_busy  = busy.get();
                     let show_bm  = show_benchmark.get();
+                    let tax_sys  = tax_system.get();
                     let lbl      = if is_busy { "Running\u{2026}" } else if prst { "Run preset" } else if scr { "Run screen" } else { "Run backtest" };
                     view! {
                         <div style="display:flex;flex-direction:column;gap:var(--space-4);">
@@ -1071,6 +1233,75 @@ fn App() -> impl IntoView {
                                         </div>
                                     })}
                                 </div>
+                            </div>
+
+                            // Tax simulation
+                            <div style="display:flex;flex-direction:column;gap:9px;">
+                                {field_heading(None, "Tax simulation", Some("What does the taxman leave you?"))}
+                                <BdTabs full_width=true
+                                    items=vec![
+                                        TabItem { value: "none".to_string(), label: "None".to_string() },
+                                        TabItem { value: "us".to_string(), label: "United States".to_string() },
+                                        TabItem { value: "de".to_string(), label: "Germany".to_string() },
+                                    ]
+                                    value=tax_sys.clone()
+                                    on_change=Box::new(move |v| tax_system.set(v)) />
+                                {(tax_sys == "us").then(|| view! {
+                                    <div style="max-width:280px;margin-top:4px;">
+                                        <BdInput mono=true label="Annual taxable income $".to_string()
+                                            placeholder="96000".to_string()
+                                            value=format!("{:.0}", tax_income.get_untracked())
+                                            on_input=Box::new(move |v| {
+                                                if let Ok(n) = v.replace(',', "").parse::<f64>() { tax_income.set(n.max(0.0)); }
+                                            }) />
+                                        <p style="margin:6px 0 0;font-size:11.5px;color:var(--text-muted);line-height:1.45;">
+                                            "Sets the long-term bracket and the NIIT cliff. Short-vs-long-term and the wash-sale rule are handled automatically."
+                                        </p>
+                                    </div>
+                                })}
+                                {(tax_sys == "de").then(|| view! {
+                                    <div style="display:flex;flex-direction:column;gap:12px;margin-top:4px;">
+                                        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;align-items:end;">
+                                            <div style="max-width:200px;">
+                                                <BdInput mono=true label="Tax-free allowance \u{20ac}".to_string()
+                                                    placeholder="1000".to_string()
+                                                    value=format!("{:.0}", tax_allowance.get_untracked())
+                                                    on_input=Box::new(move |v| {
+                                                        if let Ok(n) = v.replace(',', "").parse::<f64>() { tax_allowance.set(n.max(0.0)); }
+                                                    }) />
+                                            </div>
+                                            <div style="height:var(--control-md);display:flex;align-items:center;">
+                                                <BdSwitch checked=tax_church.get()
+                                                    on_change=Box::new(move |v| tax_church.set(v))
+                                                    label="Church tax".to_string() />
+                                            </div>
+                                            <div style="height:var(--control-md);display:flex;align-items:center;">
+                                                <BdSwitch checked=tax_vorab.get()
+                                                    on_change=Box::new(move |v| tax_vorab.set(v))
+                                                    label="Vorabpauschale".to_string() />
+                                            </div>
+                                        </div>
+                                        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+                                            <BdSwitch checked=tax_estimate.get()
+                                                on_change=Box::new(move |v| tax_estimate.set(v))
+                                                label="Treat ETFs as equity funds".to_string() />
+                                            {tax_estimate.get().then(|| view! {
+                                                <div style="width:120px;">
+                                                    <BdInput mono=true label="Teilfreistellung %".to_string()
+                                                        value=format!("{:.0}", tax_teilfrei.get_untracked())
+                                                        on_input=Box::new(move |v| {
+                                                            if let Ok(n) = v.parse::<f64>() { tax_teilfrei.set(n.clamp(0.0, 100.0)); }
+                                                        }) />
+                                                </div>
+                                            })}
+                                        </div>
+                                        {tax_estimate.get().then(|| view! {
+                                            <p style="margin:0;font-size:11.5px;color:var(--text-muted);line-height:1.45;">
+                                                "Estimate: every ETF is treated as a 30% equity fund. This over-states the exemption for bond or mixed funds."
+                                            </p>
+                                        })}
+                                    </div>
+                                })}
                             </div>
 
                             // Run

@@ -57,9 +57,20 @@ struct BacktestQuery {
     benchmark_ticker: Option<String>,
     /// Benchmark strategy string (default: "buy_and_hold").
     benchmark_strategy: Option<String>,
-    /// Tax regime: "us" | "de" | "none" (default). F2+ apply it; for now it is
-    /// recorded on the result so F6 can show which system was chosen.
+    /// Tax regime: "us" | "de" | "none" (default).
     tax: Option<String>,
+    /// US: annual taxable income (drives the LT bracket + NIIT cliff).
+    tax_income: Option<f64>,
+    /// DE: church-tax flag (26.375% → ~27.82%).
+    tax_church: Option<bool>,
+    /// DE: annual tax-free allowance (Sparerpauschbetrag).
+    tax_allowance: Option<f64>,
+    /// DE: "treat all ETFs as equity funds" estimate toggle (#61 estimate mode).
+    tax_estimate: Option<bool>,
+    /// DE: Teilfreistellung percent applied to funds in estimate mode (default 30).
+    tax_teilfrei: Option<f64>,
+    /// DE: accrue the Vorabpauschale (default on for DE).
+    tax_vorab: Option<bool>,
 }
 
 /// Map the `tax=` query value to a `TaxSystem`; anything unrecognized = None.
@@ -69,6 +80,20 @@ fn tax_system(tax: Option<&str>) -> TaxSystem {
         Some("de") => TaxSystem::Germany,
         _ => TaxSystem::None,
     }
+}
+
+/// When a tax system is active, run a pre-tax baseline on the same bars and
+/// attach it so the UI can pair after-tax against pre-tax. No-op for `None`.
+fn attach_pretax(
+    r: &mut BacktestResult, system: TaxSystem, ticker: &str, bars: &[Bar],
+    strategy: &Strategy, amount: f64, actions: &[CorporateAction],
+) {
+    if system == TaxSystem::None {
+        return;
+    }
+    let pretax = run_portfolio_backtest(ticker, bars, strategy, amount, &FillCosts::ZERO, 0.0, actions)
+        .with_amount(amount);
+    r.pretax = Some(Box::new(pretax));
 }
 
 fn default_strategy() -> String {
@@ -240,15 +265,21 @@ async fn backtest(
     let bench_ticker  = q.benchmark_ticker.clone();
     let bench_strat   = q.benchmark_strategy.clone();
     let years         = q.years;
-    // Tax regime (F1 preset; F6 will override its knobs from the query). Realized
-    // capital-gains tax is applied to the main run; the benchmark stays pre-tax.
-    let tax_cfg = TaxConfig::preset(system);
-    // Flag the ticker as a German fund (→ Vorabpauschale; Teilfreistellung when
-    // the estimate toggle, F6, is on). A direct stock stays `None`.
+    // Tax regime: preset for the system, then the user's knobs from the query.
+    // Realized tax is applied to the main run; the benchmark stays pre-tax.
+    let mut tax_cfg = TaxConfig::preset(system);
+    if let Some(v) = q.tax_income { tax_cfg.taxable_income = v; }
+    if let Some(v) = q.tax_church { tax_cfg.church_tax = v; }
+    if let Some(v) = q.tax_allowance { tax_cfg.annual_allowance = v; }
+    if let Some(v) = q.tax_estimate { tax_cfg.estimate_all_etfs_equity = v; }
+    if let Some(v) = q.tax_vorab { tax_cfg.vorabpauschale = v; }
+    let tfs_frac = q.tax_teilfrei.map(|p| p / 100.0).unwrap_or(0.30);
+    // Flag the ticker as a German fund (→ Vorabpauschale; Teilfreistellung only
+    // when the estimate toggle is on). A direct stock stays `None`.
     let fund = if system == TaxSystem::Germany
         && instrument_type.as_deref().map(is_fund_type).unwrap_or(false)
     {
-        let tfs = if tax_cfg.estimate_all_etfs_equity { 0.30 } else { 0.0 };
+        let tfs = if tax_cfg.estimate_all_etfs_equity { tfs_frac } else { 0.0 };
         Some(FundTax { teilfreistellung: tfs, distributing: false })
     } else {
         None
@@ -271,19 +302,15 @@ async fn backtest(
         r.entry_pe = Some(entry_pe);
         r.entry_index = Some(k);
         r.entry_count = Some(count);
+        attach_pretax(&mut r, system, &q.ticker, &trimmed, &strategy, amount, &actions);
         r
     } else {
-        run_portfolio_backtest_taxed(
-            &q.ticker,
-            &trim_years(bars, q.years),
-            &strategy,
-            amount,
-            &FillCosts::ZERO,
-            0.0,
-            &actions,
-            &tax_cfg,
-            fund.as_ref(),
-        ).with_amount(amount)
+        let run_bars = trim_years(bars, q.years);
+        let mut r = run_portfolio_backtest_taxed(
+            &q.ticker, &run_bars, &strategy, amount, &FillCosts::ZERO, 0.0, &actions, &tax_cfg, fund.as_ref(),
+        ).with_amount(amount);
+        attach_pretax(&mut r, system, &q.ticker, &run_bars, &strategy, amount, &actions);
+        r
     };
 
     // Optional benchmark run — a second buy-and-hold (or configured strategy) on a separate ticker.

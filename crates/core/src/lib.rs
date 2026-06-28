@@ -972,7 +972,7 @@ pub fn run_multi_asset_backtest(
                 curve: vec![],
                 metrics: compute_metrics(&[], &[]),
                 positions: vec![], trades: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-                initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: TaxSystem::None, total_tax: 0.0,
+                initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: TaxSystem::None, total_tax: 0.0, tax_per_year: vec![], pretax: None,
             },
         };
         let common = iter.fold(first, |acc, bars| {
@@ -1030,7 +1030,7 @@ pub fn run_multi_asset_backtest(
     let metrics = compute_metrics(&curve, &rets);
     // ponytail: positions left empty for multi-asset; add per-ticker summary when UI needs it.
     BacktestResult { curve, metrics, positions: vec![], trades: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: TaxSystem::None, total_tax: 0.0, }
+        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: TaxSystem::None, total_tax: 0.0, tax_per_year: vec![], pretax: None, }
 }
 
 /// 20-day trailing average daily volume at bar index `i` (excludes bar `i`).
@@ -1354,6 +1354,26 @@ pub struct BacktestResult {
     /// already reflects this drag — it is the after-tax equity path.
     #[serde(default)]
     pub total_tax: f64,
+    /// Per-calendar-year tax drag: the realized gain and tax settled each year.
+    /// Empty when `tax_system` is `None`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tax_per_year: Vec<YearTax>,
+    /// Pre-tax baseline run (same strategy, `tax = None`), attached by the API
+    /// when a tax system is active so the UI can pair after-tax vs pre-tax. The
+    /// `curve`/`metrics` on `self` are the after-tax view. Boxed; `None` for
+    /// pre-tax runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pretax: Option<Box<BacktestResult>>,
+}
+
+/// One calendar year's tax drag, for the per-year breakdown in the UI.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct YearTax {
+    pub year: i32,
+    /// Pre-tax realized gain (+ dividends) that drove the year's tax.
+    pub gain: f64,
+    /// Tax settled for the year, in the initial-cash currency.
+    pub tax: f64,
 }
 
 fn default_initial_amount() -> f64 { 10_000.0 }
@@ -1482,6 +1502,7 @@ pub fn run_portfolio_backtest_taxed(
     // to year_distributions below). Taxed at year-end, never credited to cash.
     let mut year_div_qualified = 0.0;
     let mut year_div_ordinary = 0.0;
+    let mut tax_per_year: Vec<YearTax> = Vec::new();
 
     // German fund (InvStG 2018): Teilfreistellung on gains + Vorabpauschale. When
     // `de_fund`, realized gains route to `year_fund_gain` and settle via the fund
@@ -1515,7 +1536,7 @@ pub fn run_portfolio_backtest_taxed(
         let year = bar.date.year();
         if let Some(prev) = acct_year {
             if year != prev {
-                let t = if de_fund {
+                let (t, gain) = if de_fund {
                     let value_gain = prev_pos_val - year_open_value;
                     let bz = if vap_on { basiszins(prev) } else { 0.0 };
                     let pror = fund_proration(fund_entry, prev);
@@ -1525,8 +1546,9 @@ pub fn run_portfolio_backtest_taxed(
                     );
                     loss_carry = carry;
                     cum_vap = cv;
+                    let gain = year_fund_gain + year_distributions;
                     year_fund_gain = 0.0;
-                    t
+                    (t, gain)
                 } else {
                     // DE direct stocks have no qualified/ordinary split — fold the
                     // year's distributions into the qualified slot (rates are equal).
@@ -1537,15 +1559,19 @@ pub fn run_portfolio_backtest_taxed(
                     };
                     let (t, carry) = settle_year(tax, year_st, year_lt, loss_carry, dq, do_);
                     loss_carry = carry;
+                    let gain = year_st + year_lt + dq + do_;
                     year_st = 0.0;
                     year_lt = 0.0;
-                    t
+                    (t, gain)
                 };
                 year_div_qualified = 0.0;
                 year_div_ordinary = 0.0;
                 year_distributions = 0.0;
                 portfolio.cash -= t;
                 total_tax += t;
+                if tax.system != TaxSystem::None {
+                    tax_per_year.push(YearTax { year: prev, gain, tax: t });
+                }
             }
         }
         acct_year = Some(year);
@@ -1653,21 +1679,26 @@ pub fn run_portfolio_backtest_taxed(
     // Vorabpauschale) aren't left untaxed. The curve is already built, so fold the
     // withholding into the last point. ponytail: the real January-N+1 settlement
     // falls outside the window — taxing it at the end keeps the after-tax number whole.
-    let final_tax = if de_fund {
-        let last_year = acct_year.unwrap_or(0);
+    let last_year = acct_year.unwrap_or(0);
+    let (final_tax, final_gain) = if de_fund {
         let value_gain = prev_pos_val - year_open_value;
         let bz = if vap_on { basiszins(last_year) } else { 0.0 };
         let pror = fund_proration(fund_entry, last_year);
-        settle_de_fund(tax, tfs, year_fund_gain, year_open_value, value_gain,
-            year_distributions, bz, pror, loss_carry, cum_vap).0
+        let t = settle_de_fund(tax, tfs, year_fund_gain, year_open_value, value_gain,
+            year_distributions, bz, pror, loss_carry, cum_vap).0;
+        (t, year_fund_gain + year_distributions)
     } else {
         let (dq, do_) = if tax.system == TaxSystem::Germany {
             (year_distributions, 0.0)
         } else {
             (year_div_qualified, year_div_ordinary)
         };
-        settle_year(tax, year_st, year_lt, loss_carry, dq, do_).0
+        let t = settle_year(tax, year_st, year_lt, loss_carry, dq, do_).0;
+        (t, year_st + year_lt + dq + do_)
     };
+    if tax.system != TaxSystem::None {
+        tax_per_year.push(YearTax { year: last_year, gain: final_gain, tax: final_tax });
+    }
     if final_tax != 0.0 {
         portfolio.cash -= final_tax;
         total_tax += final_tax;
@@ -1694,7 +1725,7 @@ pub fn run_portfolio_backtest_taxed(
     }];
 
     BacktestResult { curve, metrics, positions, trades, entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: tax.system, total_tax, }
+        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: tax.system, total_tax, tax_per_year, pretax: None, }
 }
 
 /// Point-in-time trailing P/E for each bar: `close / TTM EPS`, where TTM EPS is
@@ -1842,6 +1873,8 @@ pub fn run_signals_backtest(ticker: &str, bars: &[Bar], signals: &[f64]) -> Back
         benchmark: None,
         tax_system: TaxSystem::None,
         total_tax: 0.0,
+        tax_per_year: vec![],
+        pretax: None,
     }
 }
 
