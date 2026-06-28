@@ -499,7 +499,10 @@ fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
 #[tokio::main]
 async fn main() {
     let db: Db = Arc::new(Mutex::new(
-        Store::open("bagholder.duckdb").expect("opening data store"),
+        Store::open(&format!(
+            "{}/bagholder.duckdb",
+            std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string())
+        )).expect("opening data store"),
     ));
 
     let app = Router::new()
