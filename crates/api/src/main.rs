@@ -428,7 +428,7 @@ async fn screen(
         return Err((StatusCode::BAD_REQUEST, format!("unknown screen: {}", q.kind)));
     }
     let candidates = tokio::task::spawn_blocking(move || {
-        bagholder_data::low_pe(&db.lock().unwrap(), bagholder_data::DEFAULT_UNIVERSE, q.limit)
+        bagholder_data::low_pe(&db.lock().unwrap(), q.limit)
     })
     .await
     .map_err(internal)?
@@ -583,12 +583,21 @@ fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
 
 #[tokio::main]
 async fn main() {
-    let db: Db = Arc::new(Mutex::new(
-        Store::open(&format!(
-            "{}/bagholder.duckdb",
-            std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string())
-        )).expect("opening data store"),
-    ));
+    let path = format!(
+        "{}/bagholder.duckdb",
+        std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string())
+    );
+
+    // CLI: `refresh-universe` backfills the screener universe and exits, keeping
+    // the ~1000+ SEC/Yahoo calls off the request path.
+    if std::env::args().any(|a| a == "refresh-universe") {
+        let store = Store::open(&path).expect("opening data store");
+        let n = store.refresh_universe().expect("refresh_universe failed");
+        println!("universe refreshed: {n} names kept (≥ ~$2B)");
+        return;
+    }
+
+    let db: Db = Arc::new(Mutex::new(Store::open(&path).expect("opening data store")));
 
     let app = Router::new()
         .route("/api/backtest", get(backtest))
