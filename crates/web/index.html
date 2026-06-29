@@ -9,7 +9,9 @@
     <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Hanken+Grotesk:ital,wght@0,400..800;1,400..600&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet" />
     <link data-trunk rel="css" href="styles/ds.css" />
     <link data-trunk rel="copy-dir" href="assets" />
-    <!-- ponytail: wasm-opt off — its binaryen v116 download 404s on arm64; re-enable ("z") once trunk/binaryen ship an aarch64 archive, or apt-install binaryen in the wasm stage -->
+    <!-- ponytail: wasm-opt off — the API's CompressionLayer (#71) gzip/brotli-encodes
+         the wasm, so wasm-opt's ~12% raw saving is noise once gzipped; not worth
+         re-enabling. (Aside: binaryen v116 also 404s on arm64.) -->
     <link data-trunk rel="rust" data-wasm-opt="0" />
   </head>
   <body></body>
