@@ -319,6 +319,50 @@ fn parse_cik_map(body: &str) -> Result<Vec<(String, i64)>> {
     Ok(rows.into_values().map(|e| (e.ticker, e.cik_str)).collect())
 }
 
+/// Sector + industry for `symbol` from Yahoo Finance's search endpoint. Either
+/// field is `None` when Yahoo doesn't classify the name (ETFs, funds, some ADRs).
+pub fn download_sector_industry(symbol: &str) -> Result<(Option<String>, Option<String>)> {
+    let url = format!("https://query1.finance.yahoo.com/v1/finance/search?q={symbol}");
+    let body = reqwest::blocking::Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; BagholderDeLorean/0.1)")
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?
+        .get(&url)
+        .send()
+        .with_context(|| format!("searching Yahoo for {symbol}"))?
+        .error_for_status()?
+        .text()?;
+    parse_sector_industry(symbol, &body)
+}
+
+fn parse_sector_industry(symbol: &str, body: &str) -> Result<(Option<String>, Option<String>)> {
+    #[derive(Deserialize)]
+    struct Quote {
+        symbol: Option<String>,
+        sector: Option<String>,
+        industry: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        quotes: Vec<Quote>,
+    }
+    let resp: Resp = serde_json::from_str(body).context("parsing Yahoo search JSON")?;
+    // Prefer the quote whose symbol matches; else the first that carries a sector.
+    let pick = resp
+        .quotes
+        .iter()
+        .find(|q| q.symbol.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(symbol)))
+        .or_else(|| resp.quotes.iter().find(|q| q.sector.is_some()));
+    Ok(pick.map_or((None, None), |q| (q.sector.clone(), q.industry.clone())))
+}
+
+/// Market capitalisation ≈ shares outstanding × price. An approximation — see
+/// the dual-class caveat at the `universe` filter.
+pub fn market_cap(shares_outstanding: f64, price: f64) -> f64 {
+    shares_outstanding * price
+}
+
 /// All curated fundamentals for a company, by SEC CIK. Prefer
 /// `Store::fundamentals`, which resolves the CIK and caches.
 pub fn download_fundamentals(cik: i64) -> Result<Vec<Fundamental>> {
@@ -494,6 +538,24 @@ mod tests {
         let mut map = parse_cik_map(json).unwrap();
         map.sort();
         assert_eq!(map, vec![("AAPL".into(), 320193), ("MSFT".into(), 789019)]);
+    }
+
+    #[test]
+    fn market_cap_multiplies_shares_by_price() {
+        assert!((market_cap(15_000_000_000.0, 200.0) - 3.0e12).abs() < 1.0);
+    }
+
+    #[test]
+    fn parses_sector_industry_for_matching_symbol() {
+        let json = r#"{"quotes":[
+            {"symbol":"AAPL","sector":"Technology","industry":"Consumer Electronics"},
+            {"symbol":"AAPL.MX","sector":"Other","industry":"Other"}]}"#;
+        assert_eq!(
+            parse_sector_industry("AAPL", json).unwrap(),
+            (Some("Technology".into()), Some("Consumer Electronics".into()))
+        );
+        // No quotes / unclassified (e.g. an ETF) → (None, None), no error.
+        assert_eq!(parse_sector_industry("VOO", r#"{"quotes":[]}"#).unwrap(), (None, None));
     }
 
     #[test]

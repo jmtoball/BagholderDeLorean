@@ -2,9 +2,10 @@
 //! SQL, fast range scans for backtests. OHLCV is a wide table; fundamentals is
 //! tall (`ticker, period, metric, value`) so the metric set stays open-ended.
 
-use crate::{download_cik_map, download_congress_trades, download_corporate_actions, download_cramer_calls, download_fred_series, download_fundamentals, download_ohlcv, download_short_interest};
+use crate::{download_cik_map, download_congress_trades, download_corporate_actions, download_cramer_calls, download_fred_series, download_fundamentals, download_ohlcv, download_sector_industry, download_short_interest, market_cap};
 use crate::cramer::CramerCall;
 use crate::finra::ShortInterest;
+use crate::screen::DEFAULT_UNIVERSE;
 use anyhow::{Context, Result};
 use bagholder_core::{Bar, CaKind, CongressTrade, CorporateAction, Fundamental};
 use chrono::NaiveDate;
@@ -78,6 +79,15 @@ CREATE TABLE IF NOT EXISTS short_interest_fetched (ticker TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS ticker_meta (
   ticker          TEXT PRIMARY KEY,
   instrument_type TEXT
+);
+-- Market-cap-filtered screener universe (≥$2B), backfilled by refresh_universe.
+-- market_cap ≈ shares_outstanding × latest close. Refetch quarterly.
+CREATE TABLE IF NOT EXISTS universe (
+  ticker      TEXT PRIMARY KEY,
+  sector      TEXT,
+  industry    TEXT,
+  market_cap  DOUBLE,
+  computed_at DATE
 );
 ";
 
@@ -288,6 +298,85 @@ impl Store {
             .query_map([], |r| r.get::<_, String>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(tickers)
+    }
+
+    /// Backfill the `universe` table: walk every `cik_map` ticker, approximate its
+    /// market cap (latest shares outstanding × last close), keep names ≥ ~$2B, and
+    /// tag sector/industry from Yahoo search. Returns the count kept. Skips names
+    /// that error (delisted, no fundamentals, rate-limited). Throttled and meant to
+    /// run off the request path (the `refresh-universe` CLI). ~1000+ network calls.
+    ///
+    /// Single-writer caveat: DuckDB allows one read-write process at a time, so the
+    /// CLI must run with the API server stopped (a brief maintenance window), not
+    /// alongside it. ponytail: an in-process boot-triggered backfill on the API's
+    /// own connection is the contention-free path once this gets routine (see #86).
+    ///
+    /// Re-runnable: writes are idempotent (`INSERT OR REPLACE`), so a second run
+    /// tops up names skipped by transient rate-limits. ponytail: upsert-only — no
+    /// prune, so a name that later falls below $2B or delists lingers; a routine
+    /// quarterly pass should TRUNCATE-then-fill (or prune by `computed_at`).
+    pub fn refresh_universe(&self) -> Result<usize> {
+        // Dual-class names share a CIK across rows, so each row undercounts the
+        // company; keep the floor at 0.7×$2B to avoid dropping them. ponytail: pad
+        // the floor rather than summing classes — simpler, slightly permissive.
+        const FLOOR: f64 = 2.0e9 * 0.7;
+        let mut kept = 0usize;
+        for ticker in self.all_tickers()? {
+            match self.universe_row(&ticker) {
+                Ok(Some((cap, sector, industry))) if cap >= FLOOR => {
+                    self.write_universe(&ticker, sector.as_deref(), industry.as_deref(), cap)?;
+                    kept += 1;
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("refresh_universe: skipping {ticker}: {e:#}"),
+            }
+            // Be polite to SEC/Yahoo.
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        Ok(kept)
+    }
+
+    /// Compute one ticker's `(market_cap, sector, industry)`, or `None` if it lacks
+    /// a price or shares-outstanding figure. Caches prices/fundamentals as a side
+    /// effect (same lazy path as the screener).
+    fn universe_row(&self, ticker: &str) -> Result<Option<(f64, Option<String>, Option<String>)>> {
+        let bars = self.ohlcv(ticker)?;
+        let Some(last) = bars.last() else { return Ok(None); };
+        let funds = self.fundamentals(ticker)?;
+        // Most recent shares-outstanding figure.
+        let shares = funds
+            .iter()
+            .filter(|f| f.metric == "shares_outstanding")
+            .max_by_key(|f| f.period)
+            .map(|f| f.value);
+        let Some(shares) = shares.filter(|s| *s > 0.0) else { return Ok(None); };
+        let cap = market_cap(shares, last.close);
+        let (sector, industry) = download_sector_industry(ticker).unwrap_or((None, None));
+        Ok(Some((cap, sector, industry)))
+    }
+
+    fn write_universe(&self, ticker: &str, sector: Option<&str>, industry: Option<&str>, cap: f64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO universe VALUES (?, ?, ?, ?, current_date)",
+            params![ticker, sector, industry, cap],
+        )?;
+        Ok(())
+    }
+
+    /// The screening universe as `(ticker, industry)` pairs: the backfilled
+    /// `universe` table, or the hardcoded `DEFAULT_UNIVERSE` seed when it's empty.
+    /// Names without an industry tag fall back to their sector, then "Unknown".
+    pub fn screen_universe(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ticker, COALESCE(industry, sector, 'Unknown') FROM universe ORDER BY ticker",
+        )?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if rows.is_empty() {
+            return Ok(DEFAULT_UNIVERSE.iter().map(|(t, i)| (t.to_string(), i.to_string())).collect());
+        }
+        Ok(rows)
     }
 
     fn write_cik_map(&self, map: &[(String, i64)]) -> Result<()> {
@@ -578,6 +667,35 @@ mod tests {
         // re-rides ohlcv (a no-op since bars exist), stays None — never errors.
         s.write_bars("PLAIN", &[bar("2020-01-02", 50.0)]).unwrap();
         assert_eq!(s.instrument_type("PLAIN").unwrap(), None);
+    }
+
+    #[test]
+    #[ignore] // network: SEC companyfacts + Yahoo (run with `--ignored`)
+    fn refresh_universe_keeps_large_caps_with_sector() {
+        let s = Store::in_memory().unwrap();
+        // Seed cik_map directly so all_tickers() doesn't download the full directory.
+        s.write_cik_map(&[("AAPL".into(), 320193), ("MSFT".into(), 789019)]).unwrap();
+        let kept = s.refresh_universe().unwrap();
+        assert!(kept >= 1, "expected ≥1 large-cap kept, got {kept}");
+        let u = s.screen_universe().unwrap();
+        let aapl = u.iter().find(|(t, _)| t == "AAPL").expect("AAPL present");
+        assert_ne!(aapl.1, "Unknown", "AAPL should carry a sector/industry tag, got {}", aapl.1);
+    }
+
+    #[test]
+    fn screen_universe_reads_table_else_falls_back_to_seed() {
+        let s = Store::in_memory().unwrap();
+        // Empty universe table → the DEFAULT_UNIVERSE seed.
+        let seed = s.screen_universe().unwrap();
+        assert!(seed.iter().any(|(t, _)| t == "AAPL"), "fallback seed present");
+
+        // Populated table takes over; industry, else sector, else "Unknown".
+        s.write_universe("ZZZZ", Some("Energy"), Some("Oil & Gas"), 5.0e9).unwrap();
+        s.write_universe("YYYY", Some("Tech"), None, 9.0e9).unwrap();
+        let u = s.screen_universe().unwrap();
+        assert_eq!(u.len(), 2, "table replaces the seed");
+        assert!(u.contains(&("ZZZZ".to_string(), "Oil & Gas".to_string())));
+        assert!(u.contains(&("YYYY".to_string(), "Tech".to_string())), "sector fallback");
     }
 
     #[test]

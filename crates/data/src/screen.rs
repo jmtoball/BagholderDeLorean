@@ -39,13 +39,15 @@ pub const DEFAULT_UNIVERSE: &[(&str, &str)] = &[
     ("TSLA", "Autos"),
 ];
 
-/// Rank the universe by P/E relative to each name's industry median, cheapest
-/// first. Names missing a price or ≥4 quarters of EPS are skipped.
-pub fn low_pe(store: &Store, universe: &[(&str, &str)], limit: usize) -> Result<Vec<Candidate>> {
+/// Rank the screening universe by P/E relative to each name's industry median,
+/// cheapest first. Reads the backfilled `universe` table (or the `DEFAULT_UNIVERSE`
+/// seed when empty). Names missing a price or ≥4 quarters of EPS are skipped.
+pub fn low_pe(store: &Store, limit: usize) -> Result<Vec<Candidate>> {
+    let universe = store.screen_universe()?;
     // 1. each company's trailing P/E. A single name's data hiccup (delisted,
     // rate-limited, missing EPS) shouldn't sink the whole screen — skip it.
     let mut raw: Vec<(String, String, f64)> = Vec::new();
-    for (ticker, industry) in universe {
+    for (ticker, industry) in &universe {
         match company_pe(store, ticker) {
             Ok(Some(pe)) => raw.push((ticker.to_string(), industry.to_string(), pe)),
             Ok(None) => {}
