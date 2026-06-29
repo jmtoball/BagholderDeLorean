@@ -589,7 +589,9 @@ async fn main() {
     );
 
     // CLI: `refresh-universe` backfills the screener universe and exits, keeping
-    // the ~1000+ SEC/Yahoo calls off the request path.
+    // the ~1000+ SEC/Yahoo calls off the request path. Run it with the server
+    // stopped — DuckDB is single-writer, so it can't open the DB while the API
+    // holds the lock (a maintenance window; #86 tracks an in-process alternative).
     if std::env::args().any(|a| a == "refresh-universe") {
         let store = Store::open(&path).expect("opening data store");
         let n = store.refresh_universe().expect("refresh_universe failed");

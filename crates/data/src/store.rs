@@ -305,8 +305,16 @@ impl Store {
     /// tag sector/industry from Yahoo search. Returns the count kept. Skips names
     /// that error (delisted, no fundamentals, rate-limited). Throttled and meant to
     /// run off the request path (the `refresh-universe` CLI). ~1000+ network calls.
-    /// ponytail: one-shot on demand; promote to a scheduled job if quarterly refetch
-    /// becomes routine.
+    ///
+    /// Single-writer caveat: DuckDB allows one read-write process at a time, so the
+    /// CLI must run with the API server stopped (a brief maintenance window), not
+    /// alongside it. ponytail: an in-process boot-triggered backfill on the API's
+    /// own connection is the contention-free path once this gets routine (see #86).
+    ///
+    /// Re-runnable: writes are idempotent (`INSERT OR REPLACE`), so a second run
+    /// tops up names skipped by transient rate-limits. ponytail: upsert-only — no
+    /// prune, so a name that later falls below $2B or delists lingers; a routine
+    /// quarterly pass should TRUNCATE-then-fill (or prune by `computed_at`).
     pub fn refresh_universe(&self) -> Result<usize> {
         // Dual-class names share a CIK across rows, so each row undercounts the
         // company; keep the floor at 0.7×$2B to avoid dropping them. ponytail: pad
