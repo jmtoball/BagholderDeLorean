@@ -20,7 +20,7 @@ use bagholder_core::{
 use std::collections::HashMap;
 use bagholder_data::Store;
 use serde::Deserialize;
-use tower_http::{cors::CorsLayer, services::ServeDir};
+use tower_http::{compression::CompressionLayer, cors::CorsLayer, services::ServeDir};
 
 // ponytail: one global lock around the DuckDB connection — fine for single-user
 // dev. Swap for a connection pool if concurrent throughput ever matters.
@@ -580,6 +580,8 @@ async fn main() {
         .route("/api/universe", get(universe))
         // Serve the trunk-built frontend. Run `trunk build` in crates/web first.
         .fallback_service(ServeDir::new("crates/web/dist"))
+        // gzip/brotli-encode responses — the ~629 KB wasm ships ~205 KB gzipped.
+        .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .with_state(db);
 
