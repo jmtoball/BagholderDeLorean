@@ -1572,6 +1572,11 @@ pub fn run_portfolio_backtest_taxed(
                 // cash would make a fully-invested buy-and-hold's TargetWeight
                 // rebalance liquidate shares to cover it — spurious sells and a
                 // tax-on-tax cascade. The position stays whole; tax just drags equity.
+                // ponytail: exact for buy-and-hold; for active strategies this
+                // over-states the compounding base — year-N tax doesn't shrink the
+                // capital compounding in years N+1.., so a heavy intra-run taxpayer's
+                // after-tax CAGR is slightly optimistic. Accepted trade-off vs the
+                // forced-liquidation model; switch to self-funding if it bites.
                 total_tax += t;
                 if tax.system != TaxSystem::None {
                     tax_per_year.push(YearTax { year: prev, gain, tax: t });
