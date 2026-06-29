@@ -236,6 +236,16 @@ await step('Tax simulation — configurator affordances + after-tax results', as
   await page.waitForFunction(() => document.body.innerText.toLowerCase().includes('overall tax rate'), undefined, { timeout: 5000 });
   ok('German knobs + rate callout disclosed');
 
+  // Collapse button a11y: aria-expanded reflects state, label swaps.
+  const collapseBtn = page.getByRole('button', { name: 'Collapse tax simulation' });
+  if ((await collapseBtn.getAttribute('aria-expanded')) !== 'true') fail('aria-expanded not "true" when open');
+  else ok('aria-expanded="true" when open');
+  await collapseBtn.click();
+  const expandBtn = page.getByRole('button', { name: 'Expand tax simulation' });
+  if ((await expandBtn.getAttribute('aria-expanded')) !== 'false') fail('aria-expanded/label did not flip on collapse');
+  else ok('aria-expanded="false" + label flips on collapse');
+  await expandBtn.click(); // re-expand for the run below
+
   await runBtn().click();
   await waitForResult(30000);
   const body = await bodyLower();
