@@ -1567,7 +1567,16 @@ pub fn run_portfolio_backtest_taxed(
                 year_div_qualified = 0.0;
                 year_div_ordinary = 0.0;
                 year_distributions = 0.0;
-                portfolio.cash -= t;
+                // External funding: the tax is an equity drag (subtracted from the
+                // curve via `total_tax`), NOT a debit of investable cash. Debiting
+                // cash would make a fully-invested buy-and-hold's TargetWeight
+                // rebalance liquidate shares to cover it — spurious sells and a
+                // tax-on-tax cascade. The position stays whole; tax just drags equity.
+                // ponytail: exact for buy-and-hold; for active strategies this
+                // over-states the compounding base — year-N tax doesn't shrink the
+                // capital compounding in years N+1.., so a heavy intra-run taxpayer's
+                // after-tax CAGR is slightly optimistic. Accepted trade-off vs the
+                // forced-liquidation model; switch to self-funding if it bites.
                 total_tax += t;
                 if tax.system != TaxSystem::None {
                     tax_per_year.push(YearTax { year: prev, gain, tax: t });
@@ -1612,8 +1621,10 @@ pub fn run_portfolio_backtest_taxed(
             }
         }
 
-        // Mark-to-market BEFORE rebalance — today's equity reflects yesterday's position.
-        let eq = portfolio.cash + portfolio.shares(ticker) * bar.close;
+        // Mark-to-market BEFORE rebalance — today's equity reflects yesterday's
+        // position, less the cumulative tax drag (`total_tax`). The rebalance below
+        // reads the untaxed portfolio, so the tax never forces a liquidation.
+        let eq = portfolio.cash + portfolio.shares(ticker) * bar.close - total_tax;
         curve.push(EquityPoint { date: bar.date, equity: eq / initial_cash });
 
         // Signal uses only data through this bar; fills at close, earns next bar's return.
@@ -1704,7 +1715,7 @@ pub fn run_portfolio_backtest_taxed(
         tax_per_year.push(YearTax { year: last_year, gain: final_gain, tax: final_tax });
     }
     if final_tax != 0.0 {
-        portfolio.cash -= final_tax;
+        // Final-year tax (settled after the loop) drags the last point only.
         total_tax += final_tax;
         if let Some(last) = curve.last_mut() {
             last.equity -= final_tax / initial_cash;
@@ -2235,6 +2246,27 @@ mod tests {
         us.taxable_income = 96_000.0;
         let taxed = run_portfolio_backtest_taxed("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &div, &us, None);
         assert!(taxed.total_tax > 0.0, "dividend should be taxed");
+    }
+
+    #[test]
+    fn taxed_buy_and_hold_does_not_liquidate_to_pay_tax() {
+        // A dividend's tax settles at the next year boundary; external funding means
+        // the position is NOT liquidated to cover it — exactly one trade (the buy).
+        let bars = rise_then_crash_bars(); // 2020 → 2021
+        let div = vec![CorporateAction {
+            ex_date: "2020-06-15".parse().unwrap(),
+            ticker: "X".into(),
+            kind: CaKind::Dividend { amount_per_share: 8.0 },
+        }];
+        let mut us = TaxConfig::preset(TaxSystem::UsFederal);
+        us.taxable_income = 96_000.0;
+        let r = run_portfolio_backtest_taxed("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &div, &us, None);
+        assert_eq!(r.trades.iter().filter(|t| t.action == "sell").count(), 0, "must not sell to pay tax");
+        assert_eq!(r.trades.len(), 1, "only the initial buy");
+        assert!(r.total_tax > 0.0, "dividend is still taxed");
+        // The tax shows as an equity drag: after-tax final < the untaxed run.
+        let pre = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &div);
+        assert!(r.curve.last().unwrap().equity < pre.curve.last().unwrap().equity);
     }
 
     // A rise through 2020 then a 2021 crash, so an SMA crossover enters long and
