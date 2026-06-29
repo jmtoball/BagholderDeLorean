@@ -620,9 +620,13 @@ fn run_backfill(db: &Db) -> anyhow::Result<usize> {
     let mut kept = 0usize;
     for (ticker, cik) in entries {
         match compute_universe_row(&ticker, cik) {
-            // Lock held only for the upsert, never across the fetch above.
-            Ok(Some((cap, sector, industry))) if cap >= UNIVERSE_FLOOR => {
-                db.lock().unwrap().upsert_universe(&ticker, sector.as_deref(), industry.as_deref(), cap, run_date)?;
+            // Lock held only to cache the bars/fundamentals + upsert, never across
+            // the fetch above. Caching warms the screener's reads for this name.
+            Ok(Some(row)) if row.market_cap >= UNIVERSE_FLOOR => {
+                db.lock().unwrap().cache_and_upsert_universe(
+                    &ticker, &row.bars, &row.fundamentals,
+                    row.sector.as_deref(), row.industry.as_deref(), row.market_cap, run_date,
+                )?;
                 kept += 1;
             }
             Ok(_) => {}

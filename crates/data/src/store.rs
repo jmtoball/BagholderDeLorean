@@ -326,6 +326,19 @@ impl Store {
         Ok(())
     }
 
+    /// Cache a kept universe name's bars + fundamentals and upsert its row, all in
+    /// one call so the API holds the store lock once per name. Warms the cache the
+    /// screener (`company_pe` → `store.ohlcv`/`store.fundamentals`) reads from, so
+    /// the first `/api/screen` after a backfill doesn't re-download the universe.
+    pub fn cache_and_upsert_universe(
+        &self, ticker: &str, bars: &[Bar], funds: &[Fundamental],
+        sector: Option<&str>, industry: Option<&str>, cap: f64, computed_at: NaiveDate,
+    ) -> Result<()> {
+        self.write_bars(ticker, bars)?;
+        self.write_fundamentals(ticker, funds)?;
+        self.upsert_universe(ticker, sector, industry, cap, computed_at)
+    }
+
     /// Drop universe rows last confirmed before `keep_from` — i.e. names a refresh
     /// run didn't re-upsert (fell below the floor, delisted). Lets the universe
     /// shrink, not just grow.
@@ -352,8 +365,9 @@ impl Store {
         let mut kept = 0usize;
         for (ticker, cik) in self.cik_map_entries()? {
             match compute_universe_row(&ticker, cik) {
-                Ok(Some((cap, sector, industry))) if cap >= UNIVERSE_FLOOR => {
-                    self.upsert_universe(&ticker, sector.as_deref(), industry.as_deref(), cap, run_date)?;
+                Ok(Some(row)) if row.market_cap >= UNIVERSE_FLOOR => {
+                    self.cache_and_upsert_universe(&ticker, &row.bars, &row.fundamentals,
+                        row.sector.as_deref(), row.industry.as_deref(), row.market_cap, run_date)?;
                     kept += 1;
                 }
                 Ok(_) => {}
@@ -682,6 +696,27 @@ mod tests {
         let u = s.screen_universe().unwrap();
         let aapl = u.iter().find(|(t, _)| t == "AAPL").expect("AAPL present");
         assert_ne!(aapl.1, "Unknown", "AAPL should carry a sector/industry tag, got {}", aapl.1);
+        // The backfill warmed the cache: AAPL's bars + fundamentals are stored, so
+        // the screener won't re-download them.
+        assert!(!s.read_bars("AAPL").unwrap().is_empty(), "AAPL bars cached");
+        assert!(!s.read_fundamentals("AAPL").unwrap().is_empty(), "AAPL fundamentals cached");
+    }
+
+    #[test]
+    fn cache_and_upsert_warms_bars_fundamentals_and_universe() {
+        let s = Store::in_memory().unwrap();
+        let bars = [bar("2024-01-02", 100.0), bar("2024-01-03", 101.0)];
+        let funds = [Fundamental {
+            period: "2024-09-30".parse().unwrap(),
+            metric: "eps_basic".into(), period_type: "Q".into(), value: 1.5, filed_date: None,
+        }];
+        let d: NaiveDate = "2026-06-30".parse().unwrap();
+        s.cache_and_upsert_universe("AAPL", &bars, &funds, Some("Technology"), Some("Consumer Electronics"), 3.0e12, d).unwrap();
+        // Cache warmed: the screener's reads hit the store, no download.
+        assert_eq!(s.read_bars("AAPL").unwrap().len(), 2);
+        assert!(!s.read_fundamentals("AAPL").unwrap().is_empty());
+        // And the universe row is set.
+        assert!(s.screen_universe().unwrap().contains(&("AAPL".to_string(), "Consumer Electronics".to_string())));
     }
 
     #[test]

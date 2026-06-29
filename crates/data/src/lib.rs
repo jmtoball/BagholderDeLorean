@@ -367,29 +367,36 @@ pub fn market_cap(shares_outstanding: f64, price: f64) -> f64 {
 /// shares split across `cik_map` rows, each undercounting) aren't dropped.
 pub const UNIVERSE_FLOOR: f64 = 2.0e9 * 0.7;
 
-/// Compute one name's `(market_cap, sector, industry)` straight from the network,
+/// One backfilled name: its market cap, sector/industry, and the bars +
+/// fundamentals downloaded to compute it — returned so the backfill can cache
+/// them (the screener prices the universe through the same cache).
+pub struct UniverseRow {
+    pub market_cap: f64,
+    pub sector: Option<String>,
+    pub industry: Option<String>,
+    pub bars: Vec<Bar>,
+    pub fundamentals: Vec<Fundamental>,
+}
+
+/// Download one name's data and compute its market cap, straight from the network
 /// without touching the store — so the in-process backfill holds the DB lock only
-/// for the upsert, never across these slow fetches. `None` when the name lacks a
-/// price or a shares-outstanding figure (ETFs, funds, freshly-listed).
-///
-/// ponytail: discards the downloaded bars/fundamentals rather than caching them,
-/// so the first `/api/screen` after a backfill re-fetches the universe (the
-/// "cold universe is slow, cheap thereafter" model still holds — it just isn't
-/// pre-warmed). Caching here would warm the screen but balloon the DB with every
-/// kept name's full history; warm it under the upsert lock if screen latency
-/// matters (#89).
-pub fn compute_universe_row(ticker: &str, cik: i64) -> Result<Option<(f64, Option<String>, Option<String>)>> {
+/// for the cache+upsert, never across these slow fetches. `None` when the name
+/// lacks a price or a shares-outstanding figure (ETFs, funds, freshly-listed).
+/// The returned `bars`/`fundamentals` are the exact data the screener reads, so
+/// the caller can cache them and keep the post-backfill `/api/screen` warm.
+pub fn compute_universe_row(ticker: &str, cik: i64) -> Result<Option<UniverseRow>> {
     let (bars, _) = download_ohlcv(ticker)?;
     let Some(last) = bars.last() else { return Ok(None) };
-    let shares = download_fundamentals(cik)?
-        .into_iter()
+    let fundamentals = download_fundamentals(cik)?;
+    let shares = fundamentals
+        .iter()
         .filter(|f| f.metric == "shares_outstanding")
         .max_by_key(|f| f.period)
         .map(|f| f.value);
     let Some(shares) = shares.filter(|s| *s > 0.0) else { return Ok(None) };
-    let cap = market_cap(shares, last.close);
+    let market_cap = market_cap(shares, last.close);
     let (sector, industry) = download_sector_industry(ticker).unwrap_or((None, None));
-    Ok(Some((cap, sector, industry)))
+    Ok(Some(UniverseRow { market_cap, sector, industry, bars, fundamentals }))
 }
 
 /// All curated fundamentals for a company, by SEC CIK. Prefer
