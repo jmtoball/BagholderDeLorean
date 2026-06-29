@@ -2317,6 +2317,39 @@ mod tests {
         assert_eq!(r_off.trades.len(), 1);
     }
 
+    #[test]
+    fn taxed_sell_all_realizes_de_fund_terminal_gain_crediting_vap() {
+        // A DE fund held across 2024–25 (nonzero Basiszins both years) accrues a
+        // Vorabpauschale each year; sell_all realizes the terminal gain — TFS-exempt
+        // and reduced by the §19 VAP credit already taxed (not double-counted).
+        let bars: Vec<Bar> = [
+            ("2024-01-15", 100.0), ("2024-06-15", 130.0), ("2024-12-15", 160.0),
+            ("2025-06-15", 200.0), ("2025-12-15", 240.0),
+        ].iter().map(|(d, c)| bar(d, *c)).collect();
+        let fund = FundTax { teilfreistellung: 0.30, distributing: false };
+        let mut on = TaxConfig::preset(TaxSystem::Germany);
+        on.annual_allowance = 0.0; // isolate the realization arithmetic
+        let off = TaxConfig { sell_all: false, ..on.clone() };
+        let amount = 100_000.0;
+        let r_on = run_portfolio_backtest_taxed("ETF", &bars, &Strategy::BuyAndHold, amount, &FillCosts::ZERO, 0.0, &[], &on, Some(&fund));
+        let r_off = run_portfolio_backtest_taxed("ETF", &bars, &Strategy::BuyAndHold, amount, &FillCosts::ZERO, 0.0, &[], &off, Some(&fund));
+
+        assert_eq!(r_on.trades.len(), 1, "fund buy-and-hold stays 1 trade");
+        assert_eq!(r_off.trades.len(), 1);
+        assert!(r_off.total_tax > 0.0, "Vorabpauschale accrues either way");
+        assert!(r_on.total_tax > r_off.total_tax, "terminal gain adds tax");
+        assert!(r_on.curve.last().unwrap().equity < r_off.curve.last().unwrap().equity);
+
+        // The terminal-gain tax (the increment over the VAP-only run) must be LESS
+        // than taxing the raw gain at the full TFS rate — proof the §19 VAP credit
+        // reduced the gain rather than stacking on top.
+        let term_tax = r_on.total_tax - r_off.total_tax;
+        let raw_gain = (amount / 100.0) * (240.0 - 100.0); // shares × terminal Δprice
+        let no_credit = raw_gain * (1.0 - 0.30) * 0.26375;
+        assert!(term_tax > 0.0 && term_tax < no_credit,
+            "term_tax {term_tax} should be < no-credit {no_credit} (VAP credited)");
+    }
+
     // A rise through 2020 then a 2021 crash, so an SMA crossover enters long and
     // later exits at a profit — realizing a gain that crosses a year boundary.
     fn rise_then_crash_bars() -> Vec<Bar> {
