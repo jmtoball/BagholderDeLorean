@@ -14,7 +14,7 @@ use bagholder_core::{
     pairs_alloc, pe_history, pe_series, run_event_backtest, run_signals_backtest, squeeze_signals,
     run_multi_asset_backtest,
     run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate, CongressTrade,
-    run_portfolio_backtest_taxed, is_fund_type,
+    run_portfolio_backtest_taxed, is_fund_type, project_forward,
     CorporateAction, FillCosts, FundTax, Fundamental, PeHistory, RebalanceConfig, Strategy, TaxConfig, TaxSystem, SECTOR_ETFS,
 };
 use std::collections::HashMap;
@@ -73,6 +73,8 @@ struct BacktestQuery {
     tax_vorab: Option<bool>,
     /// Realize + tax all open positions on the final bar (default on).
     tax_sellall: Option<bool>,
+    /// Attach a Monte Carlo forward-projection fan to the result (default off).
+    project: Option<bool>,
 }
 
 /// Map the `tax=` query value to a `TaxSystem`; anything unrecognized = None.
@@ -344,6 +346,20 @@ async fn backtest(
             &bench_actions,
         ).with_amount(amount);
         result.benchmark = Some(Box::new(b));
+    }
+
+    // Opt-in forward projection: bootstrap the result's own daily returns and
+    // extend the curve by its own length, scaled back into the curve's equity space.
+    // ponytail: project=true re-runs the backtest to attach the projection; give it
+    // its own endpoint if backtests get expensive.
+    if q.project.unwrap_or(false) && result.curve.len() >= 2 {
+        let rets: Vec<f64> = result.curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect();
+        let last = result.curve.last().map(|p| p.equity).unwrap_or(1.0);
+        let mut proj = project_forward(&rets, result.curve.len());
+        for band in [&mut proj.p10, &mut proj.p50, &mut proj.p90] {
+            for v in band.iter_mut() { *v *= last; }
+        }
+        result.projection = Some(proj);
     }
 
     Ok(Json(result))

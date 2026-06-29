@@ -972,7 +972,7 @@ pub fn run_multi_asset_backtest(
                 curve: vec![],
                 metrics: compute_metrics(&[], &[]),
                 positions: vec![], trades: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-                initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: TaxSystem::None, total_tax: 0.0, tax_per_year: vec![], pretax: None,
+                initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: TaxSystem::None, total_tax: 0.0, tax_per_year: vec![], pretax: None, projection: None,
             },
         };
         let common = iter.fold(first, |acc, bars| {
@@ -1030,7 +1030,7 @@ pub fn run_multi_asset_backtest(
     let metrics = compute_metrics(&curve, &rets);
     // ponytail: positions left empty for multi-asset; add per-ticker summary when UI needs it.
     BacktestResult { curve, metrics, positions: vec![], trades: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: TaxSystem::None, total_tax: 0.0, tax_per_year: vec![], pretax: None, }
+        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: TaxSystem::None, total_tax: 0.0, tax_per_year: vec![], pretax: None, projection: None, }
 }
 
 /// 20-day trailing average daily volume at bar index `i` (excludes bar `i`).
@@ -1376,6 +1376,10 @@ pub struct BacktestResult {
     /// pre-tax runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pretax: Option<Box<BacktestResult>>,
+    /// Opt-in Monte Carlo forward-projection fan (attached by the API on
+    /// `project=true`), in the same equity space as `curve`. `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projection: Option<Projection>,
 }
 
 /// One calendar year's tax drag, for the per-year breakdown in the UI.
@@ -1386,6 +1390,59 @@ pub struct YearTax {
     pub gain: f64,
     /// Tax settled for the year, in the initial-cash currency.
     pub tax: f64,
+}
+
+/// Monte Carlo forward-projection fan: percentile equity paths extending past the
+/// last bar. Each vec has `horizon + 1` points; index 0 = the anchor (1.0) so the
+/// fan joins the curve once scaled by the curve's last equity.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Projection {
+    pub p10: Vec<f64>,
+    pub p50: Vec<f64>,
+    pub p90: Vec<f64>,
+    pub n_paths: usize,
+}
+
+/// xorshift64 step. Seed must be nonzero.
+fn xorshift64(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+/// Forward-project an equity fan by iid bootstrap of `returns` (simple daily
+/// returns). Resamples with replacement over `horizon_days`, 1000 paths, and
+/// returns p10 ≤ p50 ≤ p90 equity *multiples* anchored at 1.0 (index 0). The
+/// caller scales by the curve's last equity to position the fan. Deterministic:
+/// the seed is derived from `returns.len()`, so the fan is stable across reloads.
+/// ponytail: iid bootstrap + xorshift, upgrade to block-bootstrap if
+/// autocorrelation matters.
+pub fn project_forward(returns: &[f64], horizon_days: usize) -> Projection {
+    let n_paths = 1000;
+    if returns.is_empty() || horizon_days == 0 {
+        return Projection { p10: vec![1.0], p50: vec![1.0], p90: vec![1.0], n_paths };
+    }
+    let mut state = 0x9E37_79B9_7F4A_7C15u64
+        ^ (returns.len() as u64).wrapping_mul(0x2545_F491_4F6C_DD1D);
+    let mut steps: Vec<Vec<f64>> = vec![Vec::with_capacity(n_paths); horizon_days];
+    for _ in 0..n_paths {
+        let mut v = 1.0f64;
+        for step in steps.iter_mut() {
+            let idx = (xorshift64(&mut state) % returns.len() as u64) as usize;
+            v *= 1.0 + returns[idx];
+            step.push(v);
+        }
+    }
+    let pct = |sorted: &[f64], q: f64| sorted[(q * (sorted.len() - 1) as f64).floor() as usize];
+    let (mut p10, mut p50, mut p90) = (vec![1.0], vec![1.0], vec![1.0]);
+    for step in &mut steps {
+        step.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        p10.push(pct(step, 0.10));
+        p50.push(pct(step, 0.50));
+        p90.push(pct(step, 0.90));
+    }
+    Projection { p10, p50, p90, n_paths }
 }
 
 fn default_initial_amount() -> f64 { 10_000.0 }
@@ -1766,7 +1823,7 @@ pub fn run_portfolio_backtest_taxed(
     }];
 
     BacktestResult { curve, metrics, positions, trades, entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: tax.system, total_tax, tax_per_year, pretax: None, }
+        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: tax.system, total_tax, tax_per_year, pretax: None, projection: None, }
 }
 
 /// Point-in-time trailing P/E for each bar: `close / TTM EPS`, where TTM EPS is
@@ -1916,6 +1973,7 @@ pub fn run_signals_backtest(ticker: &str, bars: &[Bar], signals: &[f64]) -> Back
         total_tax: 0.0,
         tax_per_year: vec![],
         pretax: None,
+        projection: None,
     }
 }
 
@@ -2296,6 +2354,26 @@ mod tests {
         // The tax shows as an equity drag: after-tax final < the untaxed run.
         let pre = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &div);
         assert!(r.curve.last().unwrap().equity < pre.curve.last().unwrap().equity);
+    }
+
+    #[test]
+    fn projection_bands_ordered() {
+        let returns = [0.01, -0.02, 0.015, 0.0, -0.01, 0.03, -0.005, 0.008];
+        let p = project_forward(&returns, 60);
+        assert_eq!(p.p50.len(), 61, "horizon + 1 points");
+        assert_eq!((p.p10[0], p.p50[0], p.p90[0]), (1.0, 1.0, 1.0), "anchored at 1.0");
+        for i in 0..p.p50.len() {
+            assert!(p.p10[i] <= p.p50[i] + 1e-9 && p.p50[i] <= p.p90[i] + 1e-9,
+                "p10 ≤ p50 ≤ p90 at step {i}: {} {} {}", p.p10[i], p.p50[i], p.p90[i]);
+        }
+        // Deterministic for a fixed seed (stable across reloads).
+        let q = project_forward(&returns, 60);
+        assert_eq!(p.p50, q.p50);
+        assert_eq!(p.p10, q.p10);
+        assert_eq!(p.p90, q.p90);
+        // Degenerate inputs don't panic.
+        assert_eq!(project_forward(&[], 10).p50, vec![1.0]);
+        assert_eq!(project_forward(&returns, 0).p50, vec![1.0]);
     }
 
     #[test]
