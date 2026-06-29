@@ -104,6 +104,29 @@ pub struct Lot {
     pub entry_date: NaiveDate,
 }
 
+/// One realized closing of (part of) a long lot — its gain and how long it was
+/// held. Logged by `fill` for the tax engine (F2); drained by the backtest loop
+/// and bucketed into the calendar year's taxable pool. Cash-neutral bookkeeping.
+#[derive(Clone, Debug)]
+pub struct RealizedSale {
+    /// Signed realized gain: `closed_qty × (sale_price − entry_price)`.
+    pub gain: f64,
+    /// Calendar days from lot entry to this sale (US long-term at > 365).
+    pub holding_days: i64,
+}
+
+/// A loss sale still inside the US wash-sale window — a repurchase of the same
+/// ticker within 30 days disallows the loss and rolls it into the new lot's
+/// basis. Recorded by `fill` only when `track_wash` is on.
+#[derive(Clone, Debug)]
+pub struct WashLoss {
+    pub date: NaiveDate,
+    pub entry_date: NaiveDate,
+    pub qty: f64,
+    pub loss_per_share: f64,
+    pub long_term: bool,
+}
+
 /// Portfolio state: cash + open lots + running realized P&L.
 /// ponytail: single-currency, no margin — extend for multi-currency or leverage.
 #[derive(Clone, Debug, Default)]
@@ -112,6 +135,16 @@ pub struct Portfolio {
     /// ticker → open lots in fill order (FIFO).
     pub positions: HashMap<String, Vec<Lot>>,
     pub realized_pnl: f64,
+    /// Lot-matching method at sale (FIFO default; HIFO for US specific-ID).
+    pub accounting: AccountingMethod,
+    /// Per-sale realized gains awaiting tax bucketing. The backtest drains this
+    /// each bar; non-tax callers simply ignore it.
+    pub realized_sales: Vec<RealizedSale>,
+    /// When on (US tax path), `fill` records loss sales here for wash-sale
+    /// matching. Off by default → zero overhead and no behaviour change.
+    pub track_wash: bool,
+    /// Open loss sales eligible to be washed by a later repurchase.
+    pub recent_losses: Vec<WashLoss>,
 }
 
 impl Portfolio {
@@ -141,15 +174,39 @@ impl Portfolio {
             }
         } else if qty < 0.0 {
             let mut remaining = -qty;
+            let method = self.accounting;
             let lots = self.positions.entry(ticker.to_owned()).or_default();
-            // Close long lots first (FIFO).
-            for lot in lots.iter_mut().filter(|l| l.qty > 0.0) {
+            // Close long lots in the configured order: FIFO (fill order) or HIFO
+            // (highest cost basis first). Cash proceeds are identical either way —
+            // only which basis is realized, and thus the taxable gain, differs.
+            let mut order: Vec<usize> = (0..lots.len()).filter(|&i| lots[i].qty > 0.0).collect();
+            if method == AccountingMethod::Hifo {
+                order.sort_by(|&a, &b| lots[b].entry_price.total_cmp(&lots[a].entry_price));
+            }
+            for idx in order {
                 if remaining <= 0.0 { break; }
+                let lot = &mut lots[idx];
                 let closed = lot.qty.min(remaining);
-                self.realized_pnl += closed * (price - lot.entry_price);
-                self.cash += closed * price;
+                let gain = closed * (price - lot.entry_price);
+                let holding_days = (date - lot.entry_date).num_days();
+                let entry_date = lot.entry_date;
+                let entry_price = lot.entry_price;
                 lot.qty -= closed;
                 remaining -= closed;
+                self.realized_pnl += gain;
+                self.cash += closed * price;
+                self.realized_sales.push(RealizedSale { gain, holding_days });
+                // US wash-sale bookkeeping: remember loss sales so a repurchase
+                // within 30 days can disallow the loss (see `wash_replacement`).
+                if self.track_wash && gain < 0.0 {
+                    self.recent_losses.push(WashLoss {
+                        date,
+                        entry_date,
+                        qty: closed,
+                        loss_per_share: entry_price - price,
+                        long_term: holding_days > 365,
+                    });
+                }
             }
             lots.retain(|l| l.qty.abs() > 1e-10);
             // Remainder opens a short position (receive proceeds).
@@ -294,6 +351,55 @@ impl Portfolio {
                 lots.iter().map(|l| l.qty * (p - l.entry_price)).sum::<f64>()
             })
             .sum()
+    }
+
+    /// US wash-sale (IRC §1091). Call right after buying `qty` replacement shares
+    /// of `ticker` at `price` on `date`. Any loss sale of the same ticker within
+    /// the prior 30 days is disallowed: the loss is rolled into the replacement
+    /// lot's basis and the sold lot's holding period is carried onto it. Returns
+    /// the disallowed loss split `(short_term, long_term)` so the caller can back
+    /// it out of the year's taxable pool. "Substantially identical" = same ticker.
+    /// ponytail: handles the sale→repurchase direction (the Pub 550 worked example
+    /// and the dominant single-position pattern); the rarer repurchase-then-sale
+    /// direction is out of scope under this single-symbol target-weight model.
+    pub fn wash_replacement(&mut self, ticker: &str, date: NaiveDate, qty: f64, price: f64) -> (f64, f64) {
+        // Drop losses that have aged out of the 61-day window (>30 days before).
+        self.recent_losses
+            .retain(|l| l.qty > 1e-9 && (0..=30).contains(&(date - l.date).num_days()));
+
+        let mut st_disallowed = 0.0;
+        let mut lt_disallowed = 0.0;
+        let mut remaining = qty;
+        for li in 0..self.recent_losses.len() {
+            if remaining <= 1e-9 { break; }
+            let l = self.recent_losses[li].clone();
+            let w = remaining.min(l.qty);
+            let disallowed = w * l.loss_per_share;
+            if l.long_term { lt_disallowed += disallowed } else { st_disallowed += disallowed }
+            // Replacement basis absorbs the per-share loss; holding period carries
+            // (effective entry = buy date minus the sold lot's holding span).
+            let prior_holding = (l.date - l.entry_date).num_days();
+            let effective_entry = date - chrono::Duration::days(prior_holding);
+            self.carve_wash(ticker, price, date, w, price + l.loss_per_share, effective_entry);
+            self.recent_losses[li].qty -= w;
+            remaining -= w;
+        }
+        self.recent_losses.retain(|l| l.qty > 1e-9);
+        (st_disallowed, lt_disallowed)
+    }
+
+    /// Move `w` shares of the just-bought plain lot (entry `buy_price`/`buy_date`)
+    /// into a washed lot carrying `new_basis` and `effective_entry`. Net share
+    /// count is unchanged — only basis and holding period shift.
+    fn carve_wash(&mut self, ticker: &str, buy_price: f64, buy_date: NaiveDate, w: f64, new_basis: f64, effective_entry: NaiveDate) {
+        let lots = self.positions.entry(ticker.to_owned()).or_default();
+        if let Some(lot) = lots.iter_mut().find(|l| {
+            l.qty > 1e-9 && (l.entry_price - buy_price).abs() < 1e-9 && l.entry_date == buy_date
+        }) {
+            lot.qty -= w.min(lot.qty);
+        }
+        lots.retain(|l| l.qty.abs() > 1e-10);
+        lots.push(Lot { qty: w, entry_price: new_basis, entry_date: effective_entry });
     }
 }
 
@@ -866,7 +972,7 @@ pub fn run_multi_asset_backtest(
                 curve: vec![],
                 metrics: compute_metrics(&[], &[]),
                 positions: vec![], trades: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-                initial_amount: 10_000.0, final_value: 0.0, benchmark: None,
+                initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: TaxSystem::None, total_tax: 0.0, tax_per_year: vec![], pretax: None,
             },
         };
         let common = iter.fold(first, |acc, bars| {
@@ -924,7 +1030,7 @@ pub fn run_multi_asset_backtest(
     let metrics = compute_metrics(&curve, &rets);
     // ponytail: positions left empty for multi-asset; add per-ticker summary when UI needs it.
     BacktestResult { curve, metrics, positions: vec![], trades: vec![], entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, }
+        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: TaxSystem::None, total_tax: 0.0, tax_per_year: vec![], pretax: None, }
 }
 
 /// 20-day trailing average daily volume at bar index `i` (excludes bar `i`).
@@ -976,6 +1082,244 @@ pub struct PositionSummary {
     pub unrealized_pnl: f64,
 }
 
+// ===== Tax simulation (Epic F) ===========================================
+// Income/capital-gains tax modelled as one knob struct + country presets.
+// Pure compute, WASM-clean (no I/O, no new deps). Default = TaxSystem::None =
+// no tax = today's behaviour. Rates verified against IRS.gov and
+// gesetze-im-internet.de; see plan/tax-simulation-spec.md. The bracket tables
+// are inputs, not constants of nature — re-verify before each tax year.
+
+/// Which tax regime to simulate. `None` reproduces the pre-tax result exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TaxSystem {
+    #[default]
+    None,
+    UsFederal,
+    Germany,
+}
+
+/// Lot-matching method at sale. FIFO is the default and DE-mandatory; HIFO
+/// (highest-cost-first — a US specific-ID strategy) realizes less gain. Applied
+/// in F2; the DE resolver ignores it (FIFO is law).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AccountingMethod {
+    #[default]
+    Fifo,
+    Hifo,
+}
+
+/// Tax knobs. `TaxConfig::preset` fills them for a `TaxSystem`; the API/UI then
+/// overrides the user-facing ones (income, church tax, allowance, …). One struct
+/// serves both systems — fields irrelevant to a system are unused by its resolver.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaxConfig {
+    pub system: TaxSystem,
+    pub accounting: AccountingMethod,
+    /// US: annual taxable income — places long-term gains in the 0/15/20 bracket
+    /// and trips the NIIT cliff. Ignored by DE (flat rate).
+    pub taxable_income: f64,
+    /// DE: church tax (Kirchensteuer) lifts the flat rate 26.375% → ~27.82%.
+    pub church_tax: bool,
+    /// DE: Sparerpauschbetrag, the annual tax-free allowance. US: 0 (none).
+    pub annual_allowance: f64,
+    /// DE ETF: Teilfreistellung — fraction of a fund's taxable base exempt
+    /// (0.30 equity / 0.15 mixed / 0.0 bond). Consumed by F5.
+    pub etf_teilfreistellung: f64,
+    /// DE ETF: accrue the Vorabpauschale (annual advance lump-sum). Consumed by F5.
+    pub vorabpauschale: bool,
+    /// DE ETF estimate mode (#61): treat every fund as a 30%-TFS equity fund,
+    /// skipping per-fund equity quotas. Opt-in; over-states bond/mixed funds.
+    pub estimate_all_etfs_equity: bool,
+}
+
+// US federal rate tables — 2025 single filer (IRS Rev. Proc. 2024-40).
+// (upper_bound_inclusive, marginal_rate); the final bound is +inf.
+const US_LT_BRACKETS: [(f64, f64); 3] =
+    [(48_350.0, 0.0), (533_400.0, 0.15), (f64::INFINITY, 0.20)];
+const US_ORDINARY_BRACKETS: [(f64, f64); 7] = [
+    (11_925.0, 0.10), (48_475.0, 0.12), (103_350.0, 0.22), (197_300.0, 0.24),
+    (250_525.0, 0.32), (626_350.0, 0.35), (f64::INFINITY, 0.37),
+];
+const US_NIIT_RATE: f64 = 0.038;
+/// Single-filer MAGI cliff (non-indexed). ponytail: taxable_income used as the
+/// MAGI proxy and single-filer assumed — add a filing-status knob if MFJ matters.
+const US_NIIT_THRESHOLD: f64 = 200_000.0;
+
+const DE_BASE_RATE: f64 = 0.26375; // 25% Abgeltungsteuer + 5.5% Soli
+/// 8% Kirchensteuer variant (the common case). ponytail: 9% → 27.99% not exposed
+/// — add a rate field if the church-tax state needs to vary.
+const DE_CHURCH_RATE: f64 = 0.2782;
+const DE_ALLOWANCE_SINGLE: f64 = 1_000.0; // Sparerpauschbetrag (single)
+
+/// Marginal rate for `income` from a `(upper_bound, rate)` bracket table.
+fn bracket_rate(table: &[(f64, f64)], income: f64) -> f64 {
+    table.iter().find(|(hi, _)| income <= *hi).map(|(_, r)| *r).unwrap_or(0.0)
+}
+
+impl Default for TaxConfig {
+    fn default() -> Self { Self::preset(TaxSystem::None) }
+}
+
+impl TaxConfig {
+    /// Country preset filling the knobs with sane defaults. User input
+    /// (income, church tax, allowance, …) overrides afterward.
+    pub fn preset(system: TaxSystem) -> Self {
+        TaxConfig {
+            system,
+            accounting: AccountingMethod::Fifo,
+            taxable_income: 100_000.0,
+            church_tax: false,
+            annual_allowance: match system {
+                TaxSystem::Germany => DE_ALLOWANCE_SINGLE,
+                _ => 0.0,
+            },
+            etf_teilfreistellung: 0.30,
+            vorabpauschale: matches!(system, TaxSystem::Germany),
+            estimate_all_etfs_equity: false,
+        }
+    }
+
+    /// Marginal tax rate on a realized capital gain. `holding_days` = calendar
+    /// days from entry to sale (US long-term at > 365; DE ignores it). US stacks
+    /// the NIIT surtax on top; `None` is always 0.
+    /// ponytail: the US bracket is chosen from `taxable_income` alone — the gain
+    /// doesn't stack on top, so a gain straddling the 15%→20% line (or the $200k
+    /// NIIT cliff) is undertaxed. Acceptable approximation; skews low on large
+    /// gains. Stack the gain onto income for an exact figure.
+    pub fn gains_tax_rate(&self, holding_days: i64) -> f64 {
+        match self.system {
+            TaxSystem::None => 0.0,
+            TaxSystem::UsFederal => {
+                let base = if holding_days > 365 {
+                    bracket_rate(&US_LT_BRACKETS, self.taxable_income)
+                } else {
+                    bracket_rate(&US_ORDINARY_BRACKETS, self.taxable_income)
+                };
+                base + self.us_niit()
+            }
+            TaxSystem::Germany => self.de_flat_rate(),
+        }
+    }
+
+    /// NIIT surtax (US): 3.8% once income clears the cliff, else 0. Stacks on
+    /// gains and qualified dividends.
+    pub fn us_niit(&self) -> f64 {
+        if self.taxable_income > US_NIIT_THRESHOLD { US_NIIT_RATE } else { 0.0 }
+    }
+
+    /// DE flat rate, with the church-tax surcharge when enabled.
+    pub fn de_flat_rate(&self) -> f64 {
+        if self.church_tax { DE_CHURCH_RATE } else { DE_BASE_RATE }
+    }
+
+    /// Marginal tax rate on a dividend. US: `qualified` (held > 60 days in the
+    /// window) → the long-term rate; otherwise the ordinary rate (NIIT stacks on
+    /// both). DE: the flat rate, same as gains. `None` → 0.
+    pub fn dividend_tax_rate(&self, qualified: bool) -> f64 {
+        match self.system {
+            TaxSystem::None => 0.0,
+            TaxSystem::UsFederal => self.gains_tax_rate(if qualified { 400 } else { 0 }),
+            TaxSystem::Germany => self.de_flat_rate(),
+        }
+    }
+}
+
+/// German fund taxation for the traded ticker (InvStG 2018). `None` = a direct
+/// stock (no Teilfreistellung, no Vorabpauschale). Built by the API from the
+/// ticker's Yahoo instrument type (#70) and the estimate-mode flag.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FundTax {
+    /// Teilfreistellung fraction exempt before tax (0.30 equity / 0.15 mixed /
+    /// 0.0 bond). In estimate mode every fund is treated as 0.30.
+    pub teilfreistellung: f64,
+    /// Distributing (pays out) vs accumulating.
+    /// ponytail: a no-op knob today — nothing sets it and the math doesn't read
+    /// it (the Vorabpauschale nets by the numeric distributions regardless). Kept
+    /// as a placeholder for when distribution data lands; drop it if it doesn't.
+    pub distributing: bool,
+}
+
+/// Whether a Yahoo `instrumentType` denotes a fund (vs a direct equity). Used to
+/// decide fund flagging and estimate-mode Teilfreistellung (#61).
+pub fn is_fund_type(instrument_type: &str) -> bool {
+    matches!(
+        instrument_type.to_ascii_uppercase().as_str(),
+        "ETF" | "MUTUALFUND" | "MONEYMARKET" | "FUND"
+    )
+}
+
+/// Year → BMF Basiszins for the Vorabpauschale (§18 InvStG). A published per-year
+/// input — 2021/22 were 0 (negative → floored); later years per BMF letters.
+/// Unknown future years default to 0 until BMF publishes. Re-verify annually.
+fn basiszins(year: i32) -> f64 {
+    match year {
+        2023 => 0.0255,
+        2024 => 0.0229,
+        2025 => 0.0253,
+        2026 => 0.0320,
+        _ => 0.0, // 2021/2022 = 0; future years until published
+    }
+}
+
+/// Vorabpauschale (§18 InvStG) for one year, before Teilfreistellung.
+/// `basisertrag = value_start × basiszins × 0.70 × proration`; the VAP is that
+/// netted down by `distributions` and clamped to `[0, value_gain + distributions]`
+/// — zero if the fund didn't rise. `proration` is the purchase-year factor
+/// (1.0 when held all year; −1/12 per full month before purchase).
+fn vorabpauschale(value_start: f64, value_gain: f64, distributions: f64, basiszins: f64, proration: f64) -> f64 {
+    let basisertrag = value_start * basiszins * 0.70 * proration;
+    let upper = (value_gain + distributions).max(0.0);
+    (basisertrag - distributions).clamp(0.0, upper)
+}
+
+/// Purchase-year proration for the Vorabpauschale: 1.0 once a full year is held,
+/// `(13 − purchase_month)/12` in the purchase year, 0 before the fund was bought.
+fn fund_proration(entry: Option<NaiveDate>, year: i32) -> f64 {
+    use chrono::Datelike;
+    match entry {
+        Some(d) if d.year() == year => (13 - d.month() as i32) as f64 / 12.0,
+        Some(d) if d.year() < year => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// Settle one calendar year for a German fund position: realized sale gains
+/// (Teilfreistellung-exempted, reduced by the §19 Vorabpauschale credit already
+/// taxed) plus this year's Vorabpauschale (also TFS-exempted), less the annual
+/// allowance, at the DE flat rate. Returns `(tax, new_loss_carry, new_cum_vap)`.
+#[allow(clippy::too_many_arguments)]
+fn settle_de_fund(
+    cfg: &TaxConfig, tfs: f64, realized_gain: f64,
+    value_start: f64, value_gain: f64, distributions: f64, basiszins: f64, proration: f64,
+    loss_carry: f64, cum_vap: f64,
+) -> (f64, f64, f64) {
+    let rate = cfg.de_flat_rate();
+
+    // Realized gains: net losses (this year + carry) against gains; remainder carries.
+    let gains = realized_gain.max(0.0);
+    let losses = (-realized_gain.min(0.0)) + (-loss_carry);
+    let net_gain = (gains - losses).max(0.0);
+    let new_carry = -(losses - gains).max(0.0);
+
+    // §19: reduce the gain by Vorabpauschalen already taxed (no double tax).
+    let vap_credit = cum_vap.min(net_gain);
+    let sale_base = (net_gain - vap_credit) * (1.0 - tfs);
+    let mut cum_vap = cum_vap - vap_credit;
+
+    // This year's Vorabpauschale, also Teilfreistellung-exempted.
+    let vap = vorabpauschale(value_start, value_gain, distributions, basiszins, proration);
+    cum_vap += vap;
+    let vap_base = vap * (1.0 - tfs);
+
+    // Distributions are taxed as income too (TFS applies); they also netted the
+    // Vorabpauschale down above. All share the one annual allowance.
+    let dist_base = distributions * (1.0 - tfs);
+
+    let allow = cfg.annual_allowance;
+    let taxable = (sale_base + vap_base + dist_base - allow).max(0.0);
+    (taxable * rate, new_carry, cum_vap)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BacktestResult {
     pub curve: Vec<EquityPoint>,
@@ -1007,6 +1351,35 @@ pub struct BacktestResult {
     /// Optional comparison run (buy-and-hold SPY by default). Boxed to avoid infinite type size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub benchmark: Option<Box<BacktestResult>>,
+    /// Tax regime this run was computed under. `None` = pre-tax (today's result).
+    /// F2+ apply the tax; F6 displays it.
+    #[serde(default)]
+    pub tax_system: TaxSystem,
+    /// Total capital-gains tax withheld over the run, in the initial-cash currency
+    /// (same units as `final_value`). 0 when `tax_system` is `None`. The `curve`
+    /// already reflects this drag — it is the after-tax equity path.
+    #[serde(default)]
+    pub total_tax: f64,
+    /// Per-calendar-year tax drag: the realized gain and tax settled each year.
+    /// Empty when `tax_system` is `None`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tax_per_year: Vec<YearTax>,
+    /// Pre-tax baseline run (same strategy, `tax = None`), attached by the API
+    /// when a tax system is active so the UI can pair after-tax vs pre-tax. The
+    /// `curve`/`metrics` on `self` are the after-tax view. Boxed; `None` for
+    /// pre-tax runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pretax: Option<Box<BacktestResult>>,
+}
+
+/// One calendar year's tax drag, for the per-year breakdown in the UI.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct YearTax {
+    pub year: i32,
+    /// Pre-tax realized gain (+ dividends) that drove the year's tax.
+    pub gain: f64,
+    /// Tax settled for the year, in the initial-cash currency.
+    pub tax: f64,
 }
 
 fn default_initial_amount() -> f64 { 10_000.0 }
@@ -1020,10 +1393,84 @@ impl BacktestResult {
     }
 }
 
+/// Settle one calendar year's realized capital-gains + dividend tax for a direct
+/// holding (non-fund). `st_net`/`lt_net` are the year's signed short-/long-term
+/// gains (net of same-character losses); `loss_carry` is the prior carryforward
+/// (≤ 0); `div_qualified`/`div_ordinary` are the year's dividend income split by
+/// US qualification (DE ignores the split). Returns `(tax, new_carryforward)`.
+/// Losses (this year's + carried) offset short-term gains first (higher US rate),
+/// then long-term; remainder carries. `TaxSystem::None` is a no-op.
+/// ponytail: single stock pool per the spec — ST/LT losses cross-offset, the
+/// documented simplification of the full IRS net-within-then-across rule.
+fn settle_year(
+    cfg: &TaxConfig, st_net: f64, lt_net: f64, loss_carry: f64,
+    div_qualified: f64, div_ordinary: f64,
+) -> (f64, f64) {
+    if cfg.system == TaxSystem::None {
+        return (0.0, 0.0);
+    }
+    let st_rate = cfg.gains_tax_rate(0);   // ≤ 1yr → short-term / ordinary
+    let lt_rate = cfg.gains_tax_rate(400); // > 1yr → long-term (DE: same flat rate)
+
+    let gains_st = st_net.max(0.0);
+    let gains_lt = lt_net.max(0.0);
+    // All available losses as a positive figure: this year's net losses + carry.
+    let losses = (-st_net.min(0.0)) + (-lt_net.min(0.0)) + (-loss_carry);
+
+    // Offset short-term gains first, then long-term; remainder carries forward.
+    let st_taxable = (gains_st - losses).max(0.0);
+    let losses_left = (losses - gains_st).max(0.0);
+    let lt_taxable = (gains_lt - losses_left).max(0.0);
+    let losses_left = (losses_left - gains_lt).max(0.0);
+    let new_carry = -losses_left;
+
+    let tax = match cfg.system {
+        TaxSystem::UsFederal => {
+            // No allowance; qualified dividends take the long-term rate.
+            st_taxable * st_rate + lt_taxable * lt_rate
+                + div_qualified * lt_rate + div_ordinary * st_rate
+        }
+        TaxSystem::Germany => {
+            // Single flat rate; the Sparerpauschbetrag shelters gains + dividends.
+            let rate = cfg.de_flat_rate();
+            let base = st_taxable + lt_taxable + div_qualified + div_ordinary;
+            (base - cfg.annual_allowance).max(0.0) * rate
+        }
+        TaxSystem::None => 0.0,
+    };
+    (tax, new_carry)
+}
+
 /// Event-driven single-asset backtest using the portfolio state model.
 /// Processes bars in chronological order; at each bar, marks to market then
 /// rebalances to `signal * equity / price` shares at the bar's close (no lookahead).
+/// Tax-free — see `run_portfolio_backtest_taxed` to apply a tax regime.
 pub fn run_portfolio_backtest(
+    ticker: &str,
+    bars: &[Bar],
+    strategy: &Strategy,
+    initial_cash: f64,
+    costs: &FillCosts,
+    rfr_daily: f64,
+    corporate_actions: &[CorporateAction],
+) -> BacktestResult {
+    run_portfolio_backtest_taxed(
+        ticker, bars, strategy, initial_cash, costs, rfr_daily, corporate_actions,
+        &TaxConfig::default(), None,
+    )
+}
+
+/// As `run_portfolio_backtest`, but applies `tax`: realized capital-gains tax is
+/// accrued per closed lot (classified short-/long-term from the lot's entry date)
+/// and settled from cash at each calendar-year boundary, so the tax drag
+/// compounds. The returned `curve` is the after-tax equity path and `total_tax`
+/// the cumulative tax. `TaxConfig::default()` (`None`) reproduces the pre-tax run
+/// bit-for-bit. Note: only realized gains are taxed — a never-selling buy-and-hold
+/// owes no capital-gains tax here, except a German fund, which still accrues the
+/// annual Vorabpauschale. `fund` (DE only) flags the ticker as a fund and carries
+/// its Teilfreistellung %; `None` = a direct stock.
+#[allow(clippy::too_many_arguments)]
+pub fn run_portfolio_backtest_taxed(
     ticker: &str,
     bars: &[Bar],
     strategy: &Strategy,
@@ -1032,11 +1479,44 @@ pub fn run_portfolio_backtest(
     // Daily risk-free rate on idle cash. 0.0 = off. Pull from FRED DGS3MO/252 for live rate.
     rfr_daily: f64,
     corporate_actions: &[CorporateAction],
+    tax: &TaxConfig,
+    fund: Option<&FundTax>,
 ) -> BacktestResult {
+    use chrono::Datelike;
     let mut gen = strategy.clone().into_generator();
     let mut portfolio = Portfolio::new(initial_cash);
+    portfolio.accounting = tax.accounting;
+    // US wash-sale only: track loss sales so a repurchase within 30 days washes them.
+    let wash = tax.system == TaxSystem::UsFederal;
+    portfolio.track_wash = wash;
     let mut curve = Vec::with_capacity(bars.len());
     let mut trades: Vec<TradeEvent> = Vec::new();
+
+    // Annual tax-settlement state.
+    let mut acct_year: Option<i32> = None; // calendar year currently accumulating
+    let mut year_st = 0.0; // signed short-term realized gains this year
+    let mut year_lt = 0.0; // signed long-term realized gains this year
+    let mut loss_carry = 0.0; // carried-forward capital loss (≤ 0)
+    let mut total_tax = 0.0;
+    // Dividend income accrued this year (US splits qualified/ordinary; DE routes
+    // to year_distributions below). Taxed at year-end, never credited to cash.
+    let mut year_div_qualified = 0.0;
+    let mut year_div_ordinary = 0.0;
+    let mut tax_per_year: Vec<YearTax> = Vec::new();
+
+    // German fund (InvStG 2018): Teilfreistellung on gains + Vorabpauschale. When
+    // `de_fund`, realized gains route to `year_fund_gain` and settle via the fund
+    // path (TFS + §19 VAP credit) instead of the generic ST/LT settlement.
+    let de_fund = tax.system == TaxSystem::Germany && fund.is_some();
+    let vap_on = de_fund && tax.vorabpauschale;
+    let tfs = fund.map(|f| f.teilfreistellung).unwrap_or(0.0);
+    let mut year_fund_gain = 0.0;     // signed realized fund gains this year (raw)
+    let mut year_distributions = 0.0; // fund payouts this year (0 until F3 dividends)
+    let mut cum_vap = 0.0;            // Vorabpauschalen taxed so far, awaiting §19 credit
+    let mut year_open_value = 0.0;    // fund position value at the year's first bar
+    let mut open_year: Option<i32> = None;
+    let mut prev_pos_val = 0.0;       // fund position value at the previous bar
+    let mut fund_entry: Option<NaiveDate> = None; // first purchase, for VAP proration
 
     for (i, bar) in bars.iter().enumerate() {
         // Overnight accruals from the previous bar's end-of-day state.
@@ -1051,10 +1531,85 @@ pub fn run_portfolio_backtest(
             }
         }
 
+        // Year boundary: settle the prior year's accrued gains and withhold the
+        // tax from cash before this bar marks to market (≈ the January N+1 event).
+        let year = bar.date.year();
+        if let Some(prev) = acct_year {
+            if year != prev {
+                let (t, gain) = if de_fund {
+                    let value_gain = prev_pos_val - year_open_value;
+                    let bz = if vap_on { basiszins(prev) } else { 0.0 };
+                    let pror = fund_proration(fund_entry, prev);
+                    let (t, carry, cv) = settle_de_fund(
+                        tax, tfs, year_fund_gain, year_open_value, value_gain,
+                        year_distributions, bz, pror, loss_carry, cum_vap,
+                    );
+                    loss_carry = carry;
+                    cum_vap = cv;
+                    let gain = year_fund_gain + year_distributions;
+                    year_fund_gain = 0.0;
+                    (t, gain)
+                } else {
+                    // DE direct stocks have no qualified/ordinary split — fold the
+                    // year's distributions into the qualified slot (rates are equal).
+                    let (dq, do_) = if tax.system == TaxSystem::Germany {
+                        (year_distributions, 0.0)
+                    } else {
+                        (year_div_qualified, year_div_ordinary)
+                    };
+                    let (t, carry) = settle_year(tax, year_st, year_lt, loss_carry, dq, do_);
+                    loss_carry = carry;
+                    let gain = year_st + year_lt + dq + do_;
+                    year_st = 0.0;
+                    year_lt = 0.0;
+                    (t, gain)
+                };
+                year_div_qualified = 0.0;
+                year_div_ordinary = 0.0;
+                year_distributions = 0.0;
+                portfolio.cash -= t;
+                total_tax += t;
+                if tax.system != TaxSystem::None {
+                    tax_per_year.push(YearTax { year: prev, gain, tax: t });
+                }
+            }
+        }
+        acct_year = Some(year);
+
         // Apply any corporate actions on this bar's date before mark-to-market so
         // lot quantities and prices stay consistent with the adjusted close series.
         for ca in corporate_actions.iter().filter(|a| a.ex_date == bar.date && a.ticker == ticker) {
-            portfolio.apply_action(ticker, &ca.kind);
+            match &ca.kind {
+                CaKind::Split { .. } => portfolio.apply_action(ticker, &ca.kind),
+                CaKind::Dividend { amount_per_share } => {
+                    // Taxed as income, NOT credited to cash: close is adjclose, which
+                    // already reinvested the dividend — crediting it would double-count.
+                    // ponytail: reinvestment is gross (the withheld tax leaves at year
+                    // end), a small over-reinvestment vs a true raw-price model.
+                    let income = portfolio.shares(ticker).max(0.0) * amount_per_share;
+                    if income > 0.0 {
+                        match tax.system {
+                            TaxSystem::Germany => year_distributions += income,
+                            TaxSystem::UsFederal => {
+                                // Qualified for shares held > 60 days as of the ex-date.
+                                // ponytail: approximates the 121-day window (ignores the
+                                // sell-within-60-days-after disqualifier).
+                                let (held, total) = portfolio.positions.get(ticker).map(|lots| {
+                                    let total: f64 = lots.iter().filter(|l| l.qty > 0.0).map(|l| l.qty).sum();
+                                    let held: f64 = lots.iter()
+                                        .filter(|l| l.qty > 0.0 && (bar.date - l.entry_date).num_days() > 60)
+                                        .map(|l| l.qty).sum();
+                                    (held, total)
+                                }).unwrap_or((0.0, 0.0));
+                                let q_frac = if total > 0.0 { held / total } else { 0.0 };
+                                year_div_qualified += income * q_frac;
+                                year_div_ordinary += income * (1.0 - q_frac);
+                            }
+                            TaxSystem::None => {}
+                        }
+                    }
+                }
+            }
         }
 
         // Mark-to-market BEFORE rebalance — today's equity reflects yesterday's position.
@@ -1083,6 +1638,77 @@ pub fn run_portfolio_backtest(
                 shares: delta.abs(),
             });
         }
+        if delta > 1e-9 && fund_entry.is_none() {
+            fund_entry = Some(bar.date); // first purchase, for VAP purchase-year proration
+        }
+
+        // Vorabpauschale fund value (post-trade): the opening value of each year
+        // (purchase value in the buy year, since the position is bought at bar 0)
+        // and the running year-end value. Both post-execute so a buy-and-hold's
+        // start value is its actual holding, not the pre-purchase zero.
+        let pos_val_after = portfolio.shares(ticker) * bar.close;
+        if open_year != Some(year) {
+            year_open_value = pos_val_after;
+            open_year = Some(year);
+        }
+        prev_pos_val = pos_val_after;
+
+        // Bucket this bar's realized sales into the current year's taxable pool.
+        // German funds route to the fund pool (Teilfreistellung + §19); others
+        // split short-/long-term.
+        for s in portfolio.realized_sales.drain(..) {
+            if de_fund {
+                year_fund_gain += s.gain;
+            } else if s.holding_days > 365 {
+                year_lt += s.gain;
+            } else {
+                year_st += s.gain;
+            }
+        }
+
+        // A buy may be a wash-sale replacement for a recent loss — back the
+        // disallowed loss out of the pool (it moves into the new lot's basis).
+        // ponytail: a loss settled at a year boundary before a January repurchase
+        // isn't washed (the prior year already settled) — a known edge within the
+        // 30-day window, not handled.
+        if wash && delta > 1e-9 {
+            let (st_off, lt_off) = portfolio.wash_replacement(ticker, bar.date, delta, bar.close);
+            year_st += st_off;
+            year_lt += lt_off;
+        }
+    }
+
+    // Settle the final (partial) year so its realized gains (and a fund's last
+    // Vorabpauschale) aren't left untaxed. The curve is already built, so fold the
+    // withholding into the last point. ponytail: the real January-N+1 settlement
+    // falls outside the window — taxing it at the end keeps the after-tax number whole.
+    let last_year = acct_year.unwrap_or(0);
+    let (final_tax, final_gain) = if de_fund {
+        let value_gain = prev_pos_val - year_open_value;
+        let bz = if vap_on { basiszins(last_year) } else { 0.0 };
+        let pror = fund_proration(fund_entry, last_year);
+        let t = settle_de_fund(tax, tfs, year_fund_gain, year_open_value, value_gain,
+            year_distributions, bz, pror, loss_carry, cum_vap).0;
+        (t, year_fund_gain + year_distributions)
+    } else {
+        let (dq, do_) = if tax.system == TaxSystem::Germany {
+            (year_distributions, 0.0)
+        } else {
+            (year_div_qualified, year_div_ordinary)
+        };
+        let t = settle_year(tax, year_st, year_lt, loss_carry, dq, do_).0;
+        (t, year_st + year_lt + dq + do_)
+    };
+    // Skip the final push for an empty run (no bars → no real year to report).
+    if tax.system != TaxSystem::None && acct_year.is_some() {
+        tax_per_year.push(YearTax { year: last_year, gain: final_gain, tax: final_tax });
+    }
+    if final_tax != 0.0 {
+        portfolio.cash -= final_tax;
+        total_tax += final_tax;
+        if let Some(last) = curve.last_mut() {
+            last.equity -= final_tax / initial_cash;
+        }
     }
 
     let rets: Vec<f64> = curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect();
@@ -1103,7 +1729,7 @@ pub fn run_portfolio_backtest(
     }];
 
     BacktestResult { curve, metrics, positions, trades, entry_date: None, entry_pe: None, entry_index: None, entry_count: None,
-        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, }
+        initial_amount: 10_000.0, final_value: 0.0, benchmark: None, tax_system: tax.system, total_tax, tax_per_year, pretax: None, }
 }
 
 /// Point-in-time trailing P/E for each bar: `close / TTM EPS`, where TTM EPS is
@@ -1249,6 +1875,10 @@ pub fn run_signals_backtest(ticker: &str, bars: &[Bar], signals: &[f64]) -> Back
         initial_amount: 10_000.0,
         final_value: 0.0,
         benchmark: None,
+        tax_system: TaxSystem::None,
+        total_tax: 0.0,
+        tax_per_year: vec![],
+        pretax: None,
     }
 }
 
@@ -1337,6 +1967,315 @@ fn compute_metrics(curve: &[EquityPoint], rets: &[f64]) -> Metrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn us_resolver_places_gains_in_right_bracket() {
+        let mut c = TaxConfig::preset(TaxSystem::UsFederal);
+        // $96k single filer: long-term gain → 15% bracket, no NIIT (< $200k).
+        c.taxable_income = 96_000.0;
+        assert!((c.gains_tax_rate(400) - 0.15).abs() < 1e-9); // > 1yr = long-term
+        assert!((c.gains_tax_rate(200) - 0.22).abs() < 1e-9); // ≤ 1yr = ordinary 22%
+        // Low income → 0% long-term bracket.
+        c.taxable_income = 30_000.0;
+        assert!(c.gains_tax_rate(400).abs() < 1e-9);
+        // High income → 20% long-term + 3.8% NIIT stacked.
+        c.taxable_income = 600_000.0;
+        assert!((c.gains_tax_rate(400) - (0.20 + 0.038)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn de_resolver_is_flat_regardless_of_holding_period() {
+        let mut c = TaxConfig::preset(TaxSystem::Germany);
+        assert!((c.gains_tax_rate(30) - 0.26375).abs() < 1e-9);
+        assert!((c.gains_tax_rate(4000) - 0.26375).abs() < 1e-9); // no holding split
+        c.church_tax = true;
+        assert!((c.gains_tax_rate(30) - 0.2782).abs() < 1e-9);
+    }
+
+    #[test]
+    fn none_system_taxes_nothing() {
+        let c = TaxConfig::preset(TaxSystem::None);
+        assert_eq!(c.gains_tax_rate(10), 0.0);
+        assert_eq!(c.gains_tax_rate(9999), 0.0);
+    }
+
+    // --- F2: realized capital-gains tax + annual settlement -----------------
+
+    #[test]
+    fn us_settles_short_and_long_term_at_their_own_rates() {
+        let mut cfg = TaxConfig::preset(TaxSystem::UsFederal);
+        cfg.taxable_income = 96_000.0; // long-term 15%, ordinary 22%, no NIIT
+        // $1,000 short-term gain + $1,000 long-term gain in one year, no losses.
+        let (tax, carry) = settle_year(&cfg, 1_000.0, 1_000.0, 0.0, 0.0, 0.0);
+        assert!((tax - (1_000.0 * 0.22 + 1_000.0 * 0.15)).abs() < 1e-6);
+        assert_eq!(carry, 0.0);
+    }
+
+    #[test]
+    fn de_settles_flat_after_allowance() {
+        let cfg = TaxConfig::preset(TaxSystem::Germany); // €1,000 allowance, 26.375%
+        // €5,000 long-term gain, less the €1,000 Sparerpauschbetrag → €4,000 taxed.
+        let (tax, _) = settle_year(&cfg, 0.0, 5_000.0, 0.0, 0.0, 0.0);
+        assert!((tax - 4_000.0 * 0.26375).abs() < 1e-6);
+    }
+
+    #[test]
+    fn us_carries_net_loss_forward() {
+        let mut cfg = TaxConfig::preset(TaxSystem::UsFederal);
+        cfg.taxable_income = 96_000.0;
+        // Year 1: net $500 loss → no tax, carry -500 forward.
+        let (tax1, carry1) = settle_year(&cfg, 0.0, -500.0, 0.0, 0.0, 0.0);
+        assert_eq!(tax1, 0.0);
+        assert!((carry1 + 500.0).abs() < 1e-9);
+        // Year 2: $1,000 long-term gain offset by the $500 carry → $500 at 15%.
+        let (tax2, carry2) = settle_year(&cfg, 0.0, 1_000.0, carry1, 0.0, 0.0);
+        assert!((tax2 - 500.0 * 0.15).abs() < 1e-6);
+        assert_eq!(carry2, 0.0);
+    }
+
+    #[test]
+    fn hifo_realizes_less_gain_than_fifo() {
+        let d = |s: &str| s.parse::<NaiveDate>().unwrap();
+        let realized = |method| {
+            let mut p = Portfolio::new(0.0);
+            p.accounting = method;
+            p.fill("X", 10.0, 10.0, d("2020-01-02")); // cheap old lot
+            p.fill("X", 10.0, 20.0, d("2021-01-04")); // dear new lot
+            p.fill("X", -10.0, 30.0, d("2022-01-03")); // sell 10 @ 30
+            p.realized_sales.iter().map(|s| s.gain).sum::<f64>()
+        };
+        let fifo = realized(AccountingMethod::Fifo); // closes $10 lot → +200
+        let hifo = realized(AccountingMethod::Hifo); // closes $20 lot → +100
+        assert!((fifo - 200.0).abs() < 1e-9);
+        assert!((hifo - 100.0).abs() < 1e-9);
+        assert!(hifo < fifo);
+    }
+
+    #[test]
+    fn fill_classifies_holding_period_from_entry_date() {
+        let d = |s: &str| s.parse::<NaiveDate>().unwrap();
+        let mut p = Portfolio::new(0.0);
+        p.fill("X", 10.0, 10.0, d("2020-01-02")); // > 1yr at sale
+        p.fill("X", 10.0, 10.0, d("2022-06-01")); // < 1yr at sale
+        p.fill("X", -20.0, 12.0, d("2022-07-01")); // FIFO: old lot first
+        assert_eq!(p.realized_sales.len(), 2);
+        assert!(p.realized_sales[0].holding_days > 365);
+        assert!(p.realized_sales[1].holding_days <= 365);
+    }
+
+    // --- F4: US wash-sale ---------------------------------------------------
+
+    #[test]
+    fn wash_sale_disallows_loss_and_rolls_into_replacement_basis() {
+        // IRS Pub 550 worked example: buy 100 @ 1000, sell @ 750 (−250/sh),
+        // rebuy 100 @ 800 within 30 days → loss disallowed, basis = 1050.
+        let d = |s: &str| s.parse::<NaiveDate>().unwrap();
+        let mut p = Portfolio::new(200_000.0);
+        p.track_wash = true;
+        p.fill("X", 100.0, 1000.0, d("2021-01-04"));
+        p.fill("X", -100.0, 750.0, d("2021-02-01")); // realizes −25,000
+        assert_eq!(p.recent_losses.len(), 1);
+        p.fill("X", 100.0, 800.0, d("2021-02-10")); // replacement
+        let (st, lt) = p.wash_replacement("X", d("2021-02-10"), 100.0, 800.0);
+        assert!((st - 25_000.0).abs() < 1e-6, "whole short-term loss disallowed");
+        assert_eq!(lt, 0.0);
+        let lots = &p.positions["X"];
+        let washed = lots.iter().find(|l| (l.entry_price - 1050.0).abs() < 1e-6)
+            .expect("replacement lot at basis 1050");
+        assert!((washed.qty - 100.0).abs() < 1e-9);
+        assert!(washed.entry_date < d("2021-02-10"), "holding period carried back");
+        assert_eq!(p.recent_losses.len(), 0, "loss consumed");
+    }
+
+    #[test]
+    fn loss_outside_window_is_not_washed() {
+        let d = |s: &str| s.parse::<NaiveDate>().unwrap();
+        let mut p = Portfolio::new(200_000.0);
+        p.track_wash = true;
+        p.fill("X", 100.0, 1000.0, d("2021-01-04"));
+        p.fill("X", -100.0, 750.0, d("2021-02-01")); // loss
+        p.fill("X", 100.0, 800.0, d("2021-04-01")); // 59 days later — out of window
+        let (st, lt) = p.wash_replacement("X", d("2021-04-01"), 100.0, 800.0);
+        assert_eq!((st, lt), (0.0, 0.0), "no wash outside the 30-day window");
+        // Replacement keeps its plain 800 basis; the loss stays allowed.
+        let lots = &p.positions["X"];
+        assert!(lots.iter().any(|l| (l.entry_price - 800.0).abs() < 1e-9));
+    }
+
+    // --- F5: German ETF taxation (Teilfreistellung + Vorabpauschale) --------
+
+    #[test]
+    fn fund_type_detection() {
+        assert!(is_fund_type("ETF"));
+        assert!(is_fund_type("mutualfund"));
+        assert!(!is_fund_type("EQUITY"));
+        assert!(!is_fund_type(""));
+    }
+
+    #[test]
+    fn vorabpauschale_clamps_nets_and_prorates() {
+        let base = 10_000.0 * 0.0229 * 0.70;
+        // Rose enough → full Basisertrag.
+        assert!((vorabpauschale(10_000.0, 2_000.0, 0.0, 0.0229, 1.0) - base).abs() < 1e-9);
+        // Fell → clamp to zero.
+        assert_eq!(vorabpauschale(10_000.0, -500.0, 0.0, 0.0229, 1.0), 0.0);
+        // Distributing fund nets the VAP down by distributions.
+        assert!((vorabpauschale(10_000.0, 2_000.0, 50.0, 0.0229, 1.0) - (base - 50.0)).abs() < 1e-9);
+        // Purchase-year proration.
+        assert!((vorabpauschale(10_000.0, 2_000.0, 0.0, 0.0229, 0.5) - base * 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn de_fund_taxes_vorabpauschale_after_teilfreistellung() {
+        let mut cfg = TaxConfig::preset(TaxSystem::Germany);
+        cfg.annual_allowance = 0.0; // isolate the VAP
+        // Accumulating equity ETF (30% TFS) rose across 2024 (Basiszins 0.0229).
+        let (tax, _carry, cumvap) =
+            settle_de_fund(&cfg, 0.30, 0.0, 10_000.0, 2_000.0, 0.0, 0.0229, 1.0, 0.0, 0.0);
+        let vap = 10_000.0 * 0.0229 * 0.70;
+        assert!((cumvap - vap).abs() < 1e-9);
+        assert!((tax - vap * (1.0 - 0.30) * 0.26375).abs() < 1e-6);
+    }
+
+    #[test]
+    fn de_fund_sale_credits_prior_vorabpauschale_then_applies_tfs() {
+        let mut cfg = TaxConfig::preset(TaxSystem::Germany);
+        cfg.annual_allowance = 0.0;
+        // $1,000 realized gain, $200 of VAP already taxed (§19 credit), 30% TFS,
+        // no new VAP (value flat). Base = (1000 − 200) × 0.70 = 560.
+        let (tax, _carry, cumvap) =
+            settle_de_fund(&cfg, 0.30, 1_000.0, 5_000.0, 0.0, 0.0, 0.0, 1.0, 0.0, 200.0);
+        assert!((tax - 560.0 * 0.26375).abs() < 1e-6);
+        assert!(cumvap.abs() < 1e-9, "the 200 credit is consumed");
+    }
+
+    // Monthly 2024 bars (Basiszins year) rising 100→200 — an accumulating fund.
+    fn rising_2024_bars() -> Vec<Bar> {
+        let p = [
+            ("2024-01-15", 100.0), ("2024-02-15", 108.0), ("2024-03-15", 117.0),
+            ("2024-04-15", 126.0), ("2024-05-15", 136.0), ("2024-06-15", 147.0),
+            ("2024-07-15", 158.0), ("2024-08-15", 169.0), ("2024-09-15", 178.0),
+            ("2024-10-15", 186.0), ("2024-11-15", 193.0), ("2024-12-15", 200.0),
+        ];
+        p.iter().map(|(d, c)| bar(d, *c)).collect()
+    }
+
+    #[test]
+    fn de_fund_buy_and_hold_accrues_vorabpauschale() {
+        let bars = rising_2024_bars();
+        let fund = FundTax { teilfreistellung: 0.0, distributing: false };
+        // Large stake so the VAP clears the €1,000 allowance.
+        let mut de = TaxConfig::preset(TaxSystem::Germany);
+        let with_vap = run_portfolio_backtest_taxed(
+            "ETF", &bars, &Strategy::BuyAndHold, 100_000.0, &FillCosts::ZERO, 0.0, &[], &de, Some(&fund),
+        );
+        assert!(with_vap.total_tax > 0.0, "a risen accumulating fund owes Vorabpauschale");
+
+        // With the Vorabpauschale off, the same buy-and-hold realizes nothing → no tax.
+        de.vorabpauschale = false;
+        let no_vap = run_portfolio_backtest_taxed(
+            "ETF", &bars, &Strategy::BuyAndHold, 100_000.0, &FillCosts::ZERO, 0.0, &[], &de, Some(&fund),
+        );
+        assert_eq!(no_vap.total_tax, 0.0);
+    }
+
+    // --- F3: dividend taxation ----------------------------------------------
+
+    #[test]
+    fn dividend_rate_resolver() {
+        let mut us = TaxConfig::preset(TaxSystem::UsFederal);
+        us.taxable_income = 96_000.0;
+        assert!((us.dividend_tax_rate(true) - 0.15).abs() < 1e-9);  // qualified → LT
+        assert!((us.dividend_tax_rate(false) - 0.22).abs() < 1e-9); // ordinary
+        let de = TaxConfig::preset(TaxSystem::Germany);
+        assert!((de.dividend_tax_rate(true) - 0.26375).abs() < 1e-9);
+        assert!((de.dividend_tax_rate(false) - 0.26375).abs() < 1e-9);
+        assert_eq!(TaxConfig::preset(TaxSystem::None).dividend_tax_rate(true), 0.0);
+    }
+
+    #[test]
+    fn us_settles_dividends_qualified_vs_ordinary() {
+        let mut cfg = TaxConfig::preset(TaxSystem::UsFederal);
+        cfg.taxable_income = 96_000.0;
+        let (tax, _) = settle_year(&cfg, 0.0, 0.0, 0.0, 1_000.0, 500.0);
+        assert!((tax - (1_000.0 * 0.15 + 500.0 * 0.22)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn empty_run_under_tax_reports_no_year_rows() {
+        let us = TaxConfig::preset(TaxSystem::UsFederal);
+        let r = run_portfolio_backtest_taxed("X", &[], &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &[], &us, None);
+        assert!(r.tax_per_year.is_empty(), "no bogus year-0 row on an empty run");
+    }
+
+    #[test]
+    fn de_settles_dividends_flat_after_allowance() {
+        let cfg = TaxConfig::preset(TaxSystem::Germany);
+        // €2,000 dividends less the €1,000 allowance → €1,000 taxed flat.
+        let (tax, _) = settle_year(&cfg, 0.0, 0.0, 0.0, 2_000.0, 0.0);
+        assert!((tax - 1_000.0 * 0.26375).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dividends_taxed_but_not_credited_to_cash() {
+        let bars = rising_2024_bars();
+        let div = vec![CorporateAction {
+            ex_date: "2024-06-15".parse().unwrap(),
+            ticker: "X".into(),
+            kind: CaKind::Dividend { amount_per_share: 5.0 },
+        }];
+        // Pre-tax: the dividend must NOT inflate equity (adjclose already has it).
+        let with_div = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &div);
+        let without = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &[]);
+        for (a, b) in with_div.curve.iter().zip(without.curve.iter()) {
+            assert_eq!(a.equity, b.equity, "dividend credited to cash → double count");
+        }
+        // Under US tax it is taxed as income (held > 60d by June → qualified).
+        let mut us = TaxConfig::preset(TaxSystem::UsFederal);
+        us.taxable_income = 96_000.0;
+        let taxed = run_portfolio_backtest_taxed("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &div, &us, None);
+        assert!(taxed.total_tax > 0.0, "dividend should be taxed");
+    }
+
+    // A rise through 2020 then a 2021 crash, so an SMA crossover enters long and
+    // later exits at a profit — realizing a gain that crosses a year boundary.
+    fn rise_then_crash_bars() -> Vec<Bar> {
+        let p = [
+            ("2020-01-15", 100.0), ("2020-02-15", 104.0), ("2020-03-15", 108.0),
+            ("2020-04-15", 114.0), ("2020-05-15", 120.0), ("2020-06-15", 128.0),
+            ("2020-07-15", 138.0), ("2020-08-15", 150.0), ("2020-09-15", 165.0),
+            ("2020-10-15", 180.0), ("2020-11-15", 195.0), ("2020-12-15", 210.0),
+            ("2021-01-15", 200.0), ("2021-02-15", 170.0), ("2021-03-15", 140.0),
+            ("2021-04-15", 120.0), ("2021-05-15", 110.0), ("2021-06-15", 105.0),
+        ];
+        p.iter().map(|(d, c)| bar(d, *c)).collect()
+    }
+
+    #[test]
+    fn year_boundary_settlement_reduces_equity_and_none_is_unchanged() {
+        let bars = rise_then_crash_bars();
+        let strat = Strategy::SmaCrossover { fast: 3, slow: 5 };
+
+        let pre = run_portfolio_backtest("X", &bars, &strat, 10_000.0, &FillCosts::ZERO, 0.0, &[]);
+        // The scenario must actually sell, or it proves nothing.
+        assert!(pre.trades.iter().any(|t| t.action == "sell"), "expected a sell");
+
+        let mut us = TaxConfig::preset(TaxSystem::UsFederal);
+        us.taxable_income = 96_000.0;
+        let taxed = run_portfolio_backtest_taxed("X", &bars, &strat, 10_000.0, &FillCosts::ZERO, 0.0, &[], &us, None);
+        assert!(taxed.total_tax > 0.0, "a realized gain should be taxed");
+        assert!(
+            taxed.curve.last().unwrap().equity < pre.curve.last().unwrap().equity,
+            "tax withholding must lower final equity",
+        );
+
+        // tax=none reproduces the pre-tax run bit-for-bit.
+        let none = run_portfolio_backtest_taxed("X", &bars, &strat, 10_000.0, &FillCosts::ZERO, 0.0, &[], &TaxConfig::default(), None);
+        assert_eq!(none.total_tax, 0.0);
+        for (a, b) in none.curve.iter().zip(pre.curve.iter()) {
+            assert_eq!(a.equity, b.equity);
+        }
+    }
 
     fn bar(d: &str, c: f64) -> Bar {
         Bar {

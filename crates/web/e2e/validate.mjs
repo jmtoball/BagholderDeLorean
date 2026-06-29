@@ -210,6 +210,32 @@ await step('Invalid ticker → error callout', async () => {
   await shot('10-ticker-error');
 });
 
+// ─── 10b. Tax simulation — selector + after-tax results ──────────────────────
+
+await step('Tax simulation (Germany) → after-tax results', async () => {
+  await actionSelect().selectOption('buyhold');
+  await page.waitForTimeout(300);
+  await page.locator('input:not([type="checkbox"])').first().fill('AAPL');
+  // Pick Germany in the Tax simulation tabs → German knobs disclose.
+  await page.locator('button[role="tab"]:has-text("Germany")').click();
+  await page.waitForFunction(
+    () => document.body.innerText.includes('Vorabpauschale'),
+    undefined,
+    { timeout: 5000 },
+  );
+  ok('German tax knobs disclosed');
+  await runBtn().click();
+  await waitForResult(30000);
+  // innerText reflects CSS text-transform (overlines render uppercase) — match case-insensitively.
+  const body = (await page.locator('body').innerText()).toLowerCase();
+  if (!body.includes('what you actually keep') && !body.includes('total tax paid'))
+    fail('after-tax section did not render');
+  else ok('after-tax results rendered');
+  await shot('10b-tax-de');
+  // Reset to None so later steps run pre-tax.
+  await page.locator('button[role="tab"]:has-text("None")').click();
+});
+
 // ─── 11. Screen flow — Low P/E candidates ────────────────────────────────────
 
 await step('Screen: Low P/E candidates table', async () => {
