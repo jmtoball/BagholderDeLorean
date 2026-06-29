@@ -2,7 +2,7 @@
 //! SQL, fast range scans for backtests. OHLCV is a wide table; fundamentals is
 //! tall (`ticker, period, metric, value`) so the metric set stays open-ended.
 
-use crate::{download_cik_map, download_congress_trades, download_corporate_actions, download_cramer_calls, download_fred_series, download_fundamentals, download_ohlcv, download_sector_industry, download_short_interest, market_cap};
+use crate::{compute_universe_row, download_cik_map, download_congress_trades, download_corporate_actions, download_cramer_calls, download_fred_series, download_fundamentals, download_ohlcv, download_short_interest, UNIVERSE_FLOOR};
 use crate::cramer::CramerCall;
 use crate::finra::ShortInterest;
 use crate::screen::DEFAULT_UNIVERSE;
@@ -300,67 +300,69 @@ impl Store {
         Ok(tickers)
     }
 
-    /// Backfill the `universe` table: walk every `cik_map` ticker, approximate its
-    /// market cap (latest shares outstanding × last close), keep names ≥ ~$2B, and
-    /// tag sector/industry from Yahoo search. Returns the count kept. Skips names
-    /// that error (delisted, no fundamentals, rate-limited). Throttled and meant to
-    /// run off the request path (the `refresh-universe` CLI). ~1000+ network calls.
-    ///
-    /// Single-writer caveat: DuckDB allows one read-write process at a time, so the
-    /// CLI must run with the API server stopped (a brief maintenance window), not
-    /// alongside it. ponytail: an in-process boot-triggered backfill on the API's
-    /// own connection is the contention-free path once this gets routine (see #86).
-    ///
-    /// Re-runnable: writes are idempotent (`INSERT OR REPLACE`), so a second run
-    /// tops up names skipped by transient rate-limits. ponytail: upsert-only — no
-    /// prune, so a name that later falls below $2B or delists lingers; a routine
-    /// quarterly pass should TRUNCATE-then-fill (or prune by `computed_at`).
-    pub fn refresh_universe(&self) -> Result<usize> {
-        // Dual-class names share a CIK across rows, so each row undercounts the
-        // company; keep the floor at 0.7×$2B to avoid dropping them. ponytail: pad
-        // the floor rather than summing classes — simpler, slightly permissive.
-        const FLOOR: f64 = 2.0e9 * 0.7;
+    /// `(ticker, cik)` for every name in `cik_map`, lazily populating it on first
+    /// use. The backfill reads this once (a single brief lock), then fetches each
+    /// name lock-free via [`compute_universe_row`](crate::compute_universe_row).
+    pub fn cik_map_entries(&self) -> Result<Vec<(String, i64)>> {
+        let count: i64 = self.conn.query_row("SELECT count(*) FROM cik_map", [], |r| r.get(0))?;
+        if count == 0 {
+            self.write_cik_map(&download_cik_map()?)?;
+        }
+        let mut stmt = self.conn.prepare("SELECT ticker, cik FROM cik_map ORDER BY ticker")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Upsert one universe row, stamping `computed_at` with the run's date so a
+    /// later [`prune_universe`](Self::prune_universe) can drop names a run didn't
+    /// re-confirm. Idempotent (`INSERT OR REPLACE`).
+    pub fn upsert_universe(&self, ticker: &str, sector: Option<&str>, industry: Option<&str>, cap: f64, computed_at: NaiveDate) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO universe VALUES (?, ?, ?, ?, ?)",
+            params![ticker, sector, industry, cap, computed_at],
+        )?;
+        Ok(())
+    }
+
+    /// Drop universe rows last confirmed before `keep_from` — i.e. names a refresh
+    /// run didn't re-upsert (fell below the floor, delisted). Lets the universe
+    /// shrink, not just grow.
+    pub fn prune_universe(&self, keep_from: NaiveDate) -> Result<usize> {
+        let n = self.conn.execute("DELETE FROM universe WHERE computed_at < ?", params![keep_from])?;
+        Ok(n)
+    }
+
+    /// Newest `computed_at` in the `universe` table, or `None` when it's empty —
+    /// the boot path uses this to decide whether to refresh (empty or stale).
+    pub fn universe_freshness(&self) -> Result<Option<NaiveDate>> {
+        let d: Option<NaiveDate> = self
+            .conn
+            .query_row("SELECT max(computed_at) FROM universe", [], |r| r.get(0))?;
+        Ok(d)
+    }
+
+    /// Backfill the whole `universe` table in one call (holds the connection for the
+    /// full run — fine for a standalone `Store`; the API uses per-upsert locking
+    /// instead, see its `run_backfill`). Walks `cik_map`, keeps names ≥
+    /// `UNIVERSE_FLOOR`, tags sector/industry, then prunes names this run dropped.
+    /// Returns the count kept. Throttled; skips names that error.
+    pub fn refresh_universe(&self, run_date: NaiveDate) -> Result<usize> {
         let mut kept = 0usize;
-        for ticker in self.all_tickers()? {
-            match self.universe_row(&ticker) {
-                Ok(Some((cap, sector, industry))) if cap >= FLOOR => {
-                    self.write_universe(&ticker, sector.as_deref(), industry.as_deref(), cap)?;
+        for (ticker, cik) in self.cik_map_entries()? {
+            match compute_universe_row(&ticker, cik) {
+                Ok(Some((cap, sector, industry))) if cap >= UNIVERSE_FLOOR => {
+                    self.upsert_universe(&ticker, sector.as_deref(), industry.as_deref(), cap, run_date)?;
                     kept += 1;
                 }
                 Ok(_) => {}
                 Err(e) => eprintln!("refresh_universe: skipping {ticker}: {e:#}"),
             }
-            // Be polite to SEC/Yahoo.
-            std::thread::sleep(std::time::Duration::from_millis(120));
+            std::thread::sleep(std::time::Duration::from_millis(120)); // be polite to SEC/Yahoo
         }
+        self.prune_universe(run_date)?;
         Ok(kept)
-    }
-
-    /// Compute one ticker's `(market_cap, sector, industry)`, or `None` if it lacks
-    /// a price or shares-outstanding figure. Caches prices/fundamentals as a side
-    /// effect (same lazy path as the screener).
-    fn universe_row(&self, ticker: &str) -> Result<Option<(f64, Option<String>, Option<String>)>> {
-        let bars = self.ohlcv(ticker)?;
-        let Some(last) = bars.last() else { return Ok(None); };
-        let funds = self.fundamentals(ticker)?;
-        // Most recent shares-outstanding figure.
-        let shares = funds
-            .iter()
-            .filter(|f| f.metric == "shares_outstanding")
-            .max_by_key(|f| f.period)
-            .map(|f| f.value);
-        let Some(shares) = shares.filter(|s| *s > 0.0) else { return Ok(None); };
-        let cap = market_cap(shares, last.close);
-        let (sector, industry) = download_sector_industry(ticker).unwrap_or((None, None));
-        Ok(Some((cap, sector, industry)))
-    }
-
-    fn write_universe(&self, ticker: &str, sector: Option<&str>, industry: Option<&str>, cap: f64) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO universe VALUES (?, ?, ?, ?, current_date)",
-            params![ticker, sector, industry, cap],
-        )?;
-        Ok(())
     }
 
     /// The screening universe as `(ticker, industry)` pairs: the backfilled
@@ -675,11 +677,26 @@ mod tests {
         let s = Store::in_memory().unwrap();
         // Seed cik_map directly so all_tickers() doesn't download the full directory.
         s.write_cik_map(&[("AAPL".into(), 320193), ("MSFT".into(), 789019)]).unwrap();
-        let kept = s.refresh_universe().unwrap();
+        let kept = s.refresh_universe("2026-06-30".parse().unwrap()).unwrap();
         assert!(kept >= 1, "expected ≥1 large-cap kept, got {kept}");
         let u = s.screen_universe().unwrap();
         let aapl = u.iter().find(|(t, _)| t == "AAPL").expect("AAPL present");
         assert_ne!(aapl.1, "Unknown", "AAPL should carry a sector/industry tag, got {}", aapl.1);
+    }
+
+    #[test]
+    fn universe_prune_and_freshness() {
+        let s = Store::in_memory().unwrap();
+        assert_eq!(s.universe_freshness().unwrap(), None, "empty table → no freshness");
+        let old: NaiveDate = "2026-01-01".parse().unwrap();
+        let new: NaiveDate = "2026-06-30".parse().unwrap();
+        s.upsert_universe("OLD", Some("X"), None, 5.0e9, old).unwrap();
+        s.upsert_universe("NEW", Some("Y"), None, 5.0e9, new).unwrap();
+        assert_eq!(s.universe_freshness().unwrap(), Some(new));
+        // Prune drops rows a run didn't re-confirm (computed_at < keep_from).
+        assert_eq!(s.prune_universe(new).unwrap(), 1, "OLD pruned");
+        let u = s.screen_universe().unwrap();
+        assert_eq!(u, vec![("NEW".to_string(), "Y".to_string())]);
     }
 
     #[test]
@@ -690,8 +707,9 @@ mod tests {
         assert!(seed.iter().any(|(t, _)| t == "AAPL"), "fallback seed present");
 
         // Populated table takes over; industry, else sector, else "Unknown".
-        s.write_universe("ZZZZ", Some("Energy"), Some("Oil & Gas"), 5.0e9).unwrap();
-        s.write_universe("YYYY", Some("Tech"), None, 9.0e9).unwrap();
+        let d: NaiveDate = "2026-06-30".parse().unwrap();
+        s.upsert_universe("ZZZZ", Some("Energy"), Some("Oil & Gas"), 5.0e9, d).unwrap();
+        s.upsert_universe("YYYY", Some("Tech"), None, 9.0e9, d).unwrap();
         let u = s.screen_universe().unwrap();
         assert_eq!(u.len(), 2, "table replaces the seed");
         assert!(u.contains(&("ZZZZ".to_string(), "Oil & Gas".to_string())));
