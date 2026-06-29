@@ -397,9 +397,42 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     let Some(pts) = to_pts(r) else {
         return view! { <p style="color:var(--text-on-ink-muted);">"Not enough history to chart this one."</p> }.into_view();
     };
-    // After-tax line; when a pre-tax baseline is attached (tax active), plot both
-    // on one shared scale so the tax drag reads as the gap between the lines.
-    let (line, area, pretax_path) = {
+    // When a forward projection is attached, plot everything on one step-based
+    // scale extended by the horizon, and build the p10–p90 fan. Otherwise keep the
+    // date-based mapping (optionally with the pre-tax overlay). `projection_paths`
+    // is `Some((band, p50, today_x))` only in the projection case.
+    let (line, area, pretax_path, projection_paths) = if let Some(proj) = r.projection.as_ref().filter(|p| p.p50.len() >= 2) {
+        let n = r.curve.len();
+        let horizon = proj.p50.len() - 1;
+        let total = ((n - 1) + horizon).max(1) as f64;
+        let pre = r.pretax.as_ref().filter(|p| p.curve.len() == n);
+        let (mut ymin, mut ymax) = (f64::MAX, f64::MIN_POSITIVE);
+        for pt in &r.curve { ymin = ymin.min(pt.equity); ymax = ymax.max(pt.equity); }
+        if let Some(p) = pre { for pt in &p.curve { ymin = ymin.min(pt.equity); ymax = ymax.max(pt.equity); } }
+        for v in proj.p10.iter().chain(proj.p90.iter()) { ymin = ymin.min(*v); ymax = ymax.max(*v); }
+        let yspan = (ymax - ymin).max(1e-9);
+        let sx = |i: f64| PAD + (i / total) * (W - PAD * 2.0);
+        let sy = |v: f64| PAD + (1.0 - (v - ymin) / yspan) * (H - PAD * 2.0);
+        let line_of = |vals: &[f64], start: usize| -> String {
+            vals.iter().enumerate()
+                .map(|(j, &v)| format!("{}{:.1},{:.1}", if j == 0 { "M" } else { " L" }, sx((start + j) as f64), sy(v)))
+                .collect()
+        };
+        let curve_eq: Vec<f64> = r.curve.iter().map(|p| p.equity).collect();
+        let l = line_of(&curve_eq, 0);
+        let anchor_x = sx((n - 1) as f64);
+        let h_bot = H - PAD;
+        let a = format!("{l} L{:.1},{:.1} L{:.1},{:.1} Z", anchor_x, h_bot, PAD, h_bot);
+        let pre_path = pre.map(|p| line_of(&p.curve.iter().map(|x| x.equity).collect::<Vec<_>>(), 0));
+        // Fan band: p90 forward (anchored at step n-1) then p10 reversed.
+        let p90_fwd: String = proj.p90.iter().enumerate()
+            .map(|(j, &v)| format!("{}{:.1},{:.1}", if j == 0 { "M" } else { " L" }, sx((n - 1 + j) as f64), sy(v))).collect();
+        let p10_rev: String = (0..proj.p10.len()).rev()
+            .map(|j| format!(" L{:.1},{:.1}", sx((n - 1 + j) as f64), sy(proj.p10[j]))).collect();
+        let band = format!("{p90_fwd}{p10_rev} Z");
+        let p50 = line_of(&proj.p50, n - 1);
+        (l, a, pre_path, Some((band, p50, anchor_x)))
+    } else {
         let pre = r.pretax.as_ref().filter(|p| p.curve.len() >= 2);
         let (after_pts, pre_path) = if let Some(p) = pre {
             let (mut dmin, mut dmax) = (i32::MAX, i32::MIN);
@@ -422,8 +455,16 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
         let (lx, _) = *after_pts.last().unwrap();
         let h_bot = format!("{:.1}", H - PAD);
         let a = format!("{} L{:.1},{h_bot} L{:.1},{h_bot} Z", l, lx, fx);
-        (l, a, pre_path)
+        (l, a, pre_path, None)
     };
+
+    // Projection fan pieces (only Some when a projection is attached).
+    let proj_band  = projection_paths.as_ref().map(|(b, _, _)| b.clone());
+    let proj_p50   = projection_paths.as_ref().map(|(_, p, _)| p.clone());
+    let proj_today = projection_paths.as_ref().map(|(_, _, t)| format!("{:.1}", t));
+    let has_projection = projection_paths.is_some();
+    let sep_y1 = format!("{:.0}", PAD);
+    let sep_y2 = format!("{:.1}", H - PAD);
 
     let win          = r.metrics.total_return >= 0.0;
     let color        = if win { "var(--gain-200)" } else { "var(--loss-200)" };
@@ -653,12 +694,23 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                         <line x1=x1s x2=x2s y1=gy3.clone() y2=gy3
                               stroke="var(--grid-on-dark)" stroke-width="1" stroke-dasharray="3 5" />
                         <path d=area fill="url(#bd_eq_grad)" />
+                        {proj_band.clone().map(|d| view! {
+                            <path d=d fill="var(--paper-50)" fill-opacity="0.16" stroke="none" />
+                        })}
+                        {proj_today.clone().map(|x| view! {
+                            <line x1=x.clone() x2=x y1=sep_y1.clone() y2=sep_y2.clone()
+                                  stroke="var(--paper-50)" stroke-opacity="0.55" stroke-width="1.5" stroke-dasharray="2 4" />
+                        })}
                         {pretax_path.clone().map(|d| view! {
                             <path d=d fill="none" stroke="var(--text-on-ink-muted)" stroke-width="1.5"
                                   stroke-dasharray="4 4" stroke-linejoin="round" opacity="0.7" />
                         })}
                         <path d=line fill="none" stroke=color stroke-width="2.5"
                               stroke-linejoin="round" stroke-linecap="round" />
+                        {proj_p50.clone().map(|d| view! {
+                            <path d=d fill="none" stroke="var(--paper-50)" stroke-opacity="0.85" stroke-width="2"
+                                  stroke-dasharray="6 5" stroke-linejoin="round" stroke-linecap="round" />
+                        })}
                     </svg>
                     <div style="display:flex;gap:18px;margin-top:var(--space-3);font-size:var(--text-xs);\
                                 color:var(--text-on-ink-muted);font-family:var(--font-mono);">
@@ -670,7 +722,17 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                                 <span style="width:16px;height:0;border-top:2px dashed var(--text-on-ink-muted);" />"Pre-tax"
                             </span>
                         })}
+                        {has_projection.then(|| view! {
+                            <span style="display:inline-flex;align-items:center;gap:7px;">
+                                <span style="width:16px;height:0;border-top:2px dashed var(--paper-50);opacity:0.85;" />"Projection p10/p50/p90"
+                            </span>
+                        })}
                     </div>
+                    {has_projection.then(|| view! {
+                        <p style="margin:var(--space-2) 0 0;font-family:var(--font-mono);font-size:11px;color:var(--text-on-ink-muted);">
+                            "1000 bootstrap paths · p10/p50/p90 · horizon = backtest length"
+                        </p>
+                    })}
                 </div>
             </BdCard>
 
@@ -925,6 +987,7 @@ fn App() -> impl IntoView {
     let tax_teilfrei   = create_rw_signal(30.0f64);
     let tax_vorab      = create_rw_signal(true);
     let tax_sellall    = create_rw_signal(true);
+    let project_fwd    = create_rw_signal(false);
 
     // Fetch universe once on mount for datalist autocomplete.
     let universe = create_resource(
@@ -993,7 +1056,8 @@ fn App() -> impl IntoView {
                 &tax_system.get(), tax_income.get(), tax_church.get(), tax_allowance.get(),
                 tax_estimate.get(), tax_teilfrei.get(), tax_vorab.get(), tax_sellall.get(),
             );
-            let bench_suffix = format!("{bench_suffix}{tax_suffix}");
+            let project_suffix = if project_fwd.get() { "&project=true" } else { "" };
+            let bench_suffix = format!("{bench_suffix}{tax_suffix}{project_suffix}");
             let url = if a == "congress" {
                 format!(
                     "/api/backtest?ticker={t}&strategy=congress_copy_trade&year=2023\
@@ -1380,6 +1444,17 @@ fn App() -> impl IntoView {
                                         }).collect()
                                         value=timeframe.get()
                                         on_change=Box::new(move |v| timeframe.set(v)) />
+                                    // Forward projection — a horizon input, companion to "how far back?".
+                                    {move || {
+                                        let on = project_fwd.get();
+                                        view! {
+                                            <div style="display:flex;align-items:center;gap:10px;margin-top:2px;">
+                                                <BdSwitch checked=on on_change=Box::new(move |v| project_fwd.set(v))
+                                                    label=(if on { "Project forward" } else { "Backtest only" }).to_string() />
+                                                <span style="font-size:11.5px;color:var(--text-muted);font-style:italic;">"…and how far forward? (matches the backtest span)"</span>
+                                            </div>
+                                        }
+                                    }}
                                 </div>
                             </div>
 

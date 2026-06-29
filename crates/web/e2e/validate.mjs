@@ -279,6 +279,32 @@ await step('Tax simulation — configurator affordances + after-tax results', as
   await page.waitForFunction(() => document.body.innerText.includes('Add tax simulation'), undefined, { timeout: 5000 });
 });
 
+// ─── 10c. Forward projection fan ─────────────────────────────────────────────
+
+await step('Forward projection draws the cone', async () => {
+  await actionSelect().selectOption('buyhold');
+  await page.waitForTimeout(300);
+  await page.locator('input:not([type="checkbox"])').first().fill('AAPL');
+  // The "Project forward" switch lives beneath the timeframe tabs.
+  await page.locator('span:text-is("…and how far forward? (matches the backtest span)")')
+    .locator('xpath=ancestor::div[1]').locator('input[type="checkbox"]').first().check({ force: true });
+  await runBtn().click();
+  await waitForResult(30000);
+  const body = await bodyLower();
+  if (!body.includes('1000 bootstrap paths')) fail('projection caption missing');
+  else ok('projection caption renders');
+  if (!body.includes('projection p10/p50/p90')) fail('projection legend chip missing');
+  else ok('projection legend chip renders');
+  // The fan band is a <path> filled with --paper-50 at low opacity past the curve.
+  const band = await page.locator('svg path[fill-opacity="0.16"]').count();
+  if (band < 1) fail('projection band path did not render');
+  else ok(`projection band renders (${band} path)`);
+  await shot('10c-projection');
+  // Toggle back off for later steps.
+  await page.locator('span:text-is("…and how far forward? (matches the backtest span)")')
+    .locator('xpath=ancestor::div[1]').locator('input[type="checkbox"]').first().uncheck({ force: true });
+});
+
 // ─── 11. Screen flow — Low P/E candidates ────────────────────────────────────
 
 await step('Screen: Low P/E candidates table', async () => {
