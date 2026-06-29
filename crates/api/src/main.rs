@@ -1,11 +1,15 @@
 //! HTTP API: runs backtests and serves the WASM frontend.
 //!   GET /api/backtest?ticker=AAPL&strategy=sma_crossover&fast=20&slow=50&years=10
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
-    extract::{Query, State},
+    extract::{Query, Request, State},
     http::StatusCode,
+    middleware::{self, Next},
+    response::Response,
     routing::get,
     Json, Router,
 };
@@ -581,25 +585,88 @@ fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+}
+
+/// Refresh stale if the universe is empty or older than this.
+const UNIVERSE_MAX_AGE_DAYS: i64 = 90;
+/// Self-shut down after this much idle time (no request, no backfill).
+const IDLE_SHUTDOWN_SECS: u64 = 600;
+
+/// Spawn the universe backfill on the shared connection if one isn't already
+/// running (single-flight via `running`). Per-ticker locking: the slow network
+/// fetch is lock-free, and the store lock is taken only for each upsert, so
+/// `/api/screen` and `/api/backtest` keep serving (off the prior table or the
+/// seed) throughout the ~10–30 min run.
+fn spawn_backfill(db: Db, running: Arc<AtomicBool>) {
+    if running.swap(true, Ordering::SeqCst) {
+        return; // already in flight
+    }
+    tokio::task::spawn_blocking(move || {
+        let outcome = run_backfill(&db);
+        running.store(false, Ordering::SeqCst);
+        match outcome {
+            Ok(n) => println!("universe backfill done: {n} names kept"),
+            Err(e) => eprintln!("universe backfill failed: {e:#}"),
+        }
+    });
+}
+
+fn run_backfill(db: &Db) -> anyhow::Result<usize> {
+    use bagholder_data::{compute_universe_row, UNIVERSE_FLOOR};
+    let entries = { db.lock().unwrap().cik_map_entries()? }; // one brief lock
+    let run_date = chrono::Utc::now().date_naive();
+    let mut kept = 0usize;
+    for (ticker, cik) in entries {
+        match compute_universe_row(&ticker, cik) {
+            // Lock held only for the upsert, never across the fetch above.
+            Ok(Some((cap, sector, industry))) if cap >= UNIVERSE_FLOOR => {
+                db.lock().unwrap().upsert_universe(&ticker, sector.as_deref(), industry.as_deref(), cap, run_date)?;
+                kept += 1;
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("backfill: skipping {ticker}: {e:#}"),
+        }
+        std::thread::sleep(Duration::from_millis(120)); // be polite to SEC/Yahoo
+    }
+    db.lock().unwrap().prune_universe(run_date)?; // drop names this run didn't re-confirm
+    Ok(kept)
+}
+
+/// Middleware: stamp the last-activity time on every request so the idle watcher
+/// knows when the machine can self-stop.
+async fn track_activity(State(last): State<Arc<AtomicU64>>, req: Request, next: Next) -> Response {
+    last.store(now_secs(), Ordering::Relaxed);
+    next.run(req).await
+}
+
 #[tokio::main]
 async fn main() {
     let path = format!(
         "{}/bagholder.duckdb",
         std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string())
     );
-
-    // CLI: `refresh-universe` backfills the screener universe and exits, keeping
-    // the ~1000+ SEC/Yahoo calls off the request path. Run it with the server
-    // stopped — DuckDB is single-writer, so it can't open the DB while the API
-    // holds the lock (a maintenance window; #86 tracks an in-process alternative).
-    if std::env::args().any(|a| a == "refresh-universe") {
-        let store = Store::open(&path).expect("opening data store");
-        let n = store.refresh_universe().expect("refresh_universe failed");
-        println!("universe refreshed: {n} names kept (≥ ~$2B)");
-        return;
-    }
-
     let db: Db = Arc::new(Mutex::new(Store::open(&path).expect("opening data store")));
+
+    let backfill_running = Arc::new(AtomicBool::new(false));
+    let last_active = Arc::new(AtomicU64::new(now_secs()));
+
+    // Boot-trigger: refresh the universe in the background when it's empty or
+    // stale. Boot-time (not a timer) — the Fly Machine is stopped most of the
+    // time, so an in-process interval wouldn't tick. First run / quarterly
+    // recheck fire on the next request after a deploy or once 90 days pass.
+    let stale = {
+        let s = db.lock().unwrap();
+        match s.universe_freshness().ok().flatten() {
+            None => true,
+            Some(d) => (chrono::Utc::now().date_naive() - d).num_days() > UNIVERSE_MAX_AGE_DAYS,
+        }
+    };
+    if stale {
+        println!("universe empty or stale → spawning backfill");
+        spawn_backfill(db.clone(), backfill_running.clone());
+    }
 
     let app = Router::new()
         .route("/api/backtest", get(backtest))
@@ -610,6 +677,7 @@ async fn main() {
         .route("/api/universe", get(universe))
         // Serve the trunk-built frontend. Run `trunk build` in crates/web first.
         .fallback_service(ServeDir::new("crates/web/dist"))
+        .layer(middleware::from_fn_with_state(last_active.clone(), track_activity))
         // gzip/brotli-encode responses — the ~629 KB wasm ships ~205 KB gzipped.
         .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
@@ -619,5 +687,44 @@ async fn main() {
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(addr.as_str()).await.unwrap();
     println!("listening on http://{addr}");
-    axum::serve(listener, app).await.unwrap();
+
+    // Graceful shutdown on SIGTERM, or when idle with no backfill in flight — a
+    // clean exit lets Fly stop the Machine (autostart revives it on next request).
+    let shutdown = {
+        let last = last_active.clone();
+        let running = backfill_running.clone();
+        async move {
+            let idle = async {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    let quiet = now_secs().saturating_sub(last.load(Ordering::Relaxed)) >= IDLE_SHUTDOWN_SECS;
+                    if quiet && !running.load(Ordering::SeqCst) {
+                        println!("idle and no backfill in flight → shutting down");
+                        break;
+                    }
+                }
+            };
+            tokio::select! {
+                _ = idle => {},
+                _ = sigterm() => println!("SIGTERM → shutting down"),
+            }
+        }
+    };
+    axum::serve(listener, app).with_graceful_shutdown(shutdown).await.unwrap();
+    // `db` (and its DuckDB connection) drops here, flushing cleanly on exit.
+}
+
+/// Resolve when the process receives SIGTERM (Fly's stop signal); on non-unix,
+/// fall back to Ctrl-C.
+async fn sigterm() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        term.recv().await;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

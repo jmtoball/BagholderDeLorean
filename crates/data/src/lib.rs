@@ -363,6 +363,35 @@ pub fn market_cap(shares_outstanding: f64, price: f64) -> f64 {
     shares_outstanding * price
 }
 
+/// Universe inclusion floor: $2B, padded to 0.7× so dual-class names (whose
+/// shares split across `cik_map` rows, each undercounting) aren't dropped.
+pub const UNIVERSE_FLOOR: f64 = 2.0e9 * 0.7;
+
+/// Compute one name's `(market_cap, sector, industry)` straight from the network,
+/// without touching the store — so the in-process backfill holds the DB lock only
+/// for the upsert, never across these slow fetches. `None` when the name lacks a
+/// price or a shares-outstanding figure (ETFs, funds, freshly-listed).
+///
+/// ponytail: discards the downloaded bars/fundamentals rather than caching them,
+/// so the first `/api/screen` after a backfill re-fetches the universe (the
+/// "cold universe is slow, cheap thereafter" model still holds — it just isn't
+/// pre-warmed). Caching here would warm the screen but balloon the DB with every
+/// kept name's full history; warm it under the upsert lock if screen latency
+/// matters (#89).
+pub fn compute_universe_row(ticker: &str, cik: i64) -> Result<Option<(f64, Option<String>, Option<String>)>> {
+    let (bars, _) = download_ohlcv(ticker)?;
+    let Some(last) = bars.last() else { return Ok(None) };
+    let shares = download_fundamentals(cik)?
+        .into_iter()
+        .filter(|f| f.metric == "shares_outstanding")
+        .max_by_key(|f| f.period)
+        .map(|f| f.value);
+    let Some(shares) = shares.filter(|s| *s > 0.0) else { return Ok(None) };
+    let cap = market_cap(shares, last.close);
+    let (sector, industry) = download_sector_industry(ticker).unwrap_or((None, None));
+    Ok(Some((cap, sector, industry)))
+}
+
 /// All curated fundamentals for a company, by SEC CIK. Prefer
 /// `Store::fundamentals`, which resolves the CIK and caches.
 pub fn download_fundamentals(cik: i64) -> Result<Vec<Fundamental>> {
