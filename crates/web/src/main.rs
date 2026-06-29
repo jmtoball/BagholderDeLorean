@@ -301,7 +301,16 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
         let b_ret    = fmt_pct(b.metrics.total_return);
         let b_final  = fmt_money(b.final_value);
         let b_tone   = if b.metrics.total_return >= 0.0 { "gain" } else { "loss" };
+        // The benchmark stays pre-tax even when the strategy is taxed — flag it so
+        // the comparison isn't misread as the strategy underperforming.
+        let bench_pretax_note = (r.tax_system != TaxSystem::None).then(|| view! {
+            <p style="margin:0 0 -4px;font-family:var(--font-mono);font-size:11px;color:var(--text-faint);">
+                "Benchmark shown pre-tax."
+            </p>
+        });
         view! {
+            <>
+            {bench_pretax_note}
             <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:var(--space-3);">
                 <BdCard padding="16px".to_string()>
                     <BdStat label="Bench. value".to_string() value=b_final size="sm".to_string() />
@@ -326,6 +335,7 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                     <BdStat label="Bench. Recovery".to_string() value=b_recovery size="sm".to_string() />
                 </BdCard>
             </div>
+            </>
         }
     });
 
@@ -1298,6 +1308,11 @@ fn App() -> impl IntoView {
                                         {tax_estimate.get().then(|| view! {
                                             <p style="margin:0;font-size:11.5px;color:var(--text-muted);line-height:1.45;">
                                                 "Estimate: every ETF is treated as a 30% equity fund. This over-states the exemption for bond or mixed funds."
+                                            </p>
+                                        })}
+                                        {(!tax_estimate.get()).then(|| view! {
+                                            <p style="margin:0;font-size:11.5px;color:var(--text-muted);line-height:1.45;">
+                                                "ETFs are taxed in full \u{2014} no Teilfreistellung exemption \u{2014} until you switch this on."
                                             </p>
                                         })}
                                     </div>

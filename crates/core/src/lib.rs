@@ -1182,6 +1182,10 @@ impl TaxConfig {
     /// Marginal tax rate on a realized capital gain. `holding_days` = calendar
     /// days from entry to sale (US long-term at > 365; DE ignores it). US stacks
     /// the NIIT surtax on top; `None` is always 0.
+    /// ponytail: the US bracket is chosen from `taxable_income` alone — the gain
+    /// doesn't stack on top, so a gain straddling the 15%→20% line (or the $200k
+    /// NIIT cliff) is undertaxed. Acceptable approximation; skews low on large
+    /// gains. Stack the gain onto income for an exact figure.
     pub fn gains_tax_rate(&self, holding_days: i64) -> f64 {
         match self.system {
             TaxSystem::None => 0.0,
@@ -1228,8 +1232,10 @@ pub struct FundTax {
     /// Teilfreistellung fraction exempt before tax (0.30 equity / 0.15 mixed /
     /// 0.0 bond). In estimate mode every fund is treated as 0.30.
     pub teilfreistellung: f64,
-    /// Distributing (pays out) vs accumulating. Carried for the UI/F3; the
-    /// Vorabpauschale nets down by the numeric distributions either way.
+    /// Distributing (pays out) vs accumulating.
+    /// ponytail: a no-op knob today — nothing sets it and the math doesn't read
+    /// it (the Vorabpauschale nets by the numeric distributions regardless). Kept
+    /// as a placeholder for when distribution data lands; drop it if it doesn't.
     pub distributing: bool,
 }
 
@@ -1383,12 +1389,6 @@ impl BacktestResult {
     pub fn with_amount(mut self, amount: f64) -> Self {
         self.initial_amount = amount;
         self.final_value = amount * self.curve.last().map(|p| p.equity).unwrap_or(1.0);
-        self
-    }
-
-    /// Records which tax system produced this result (for display in F6).
-    pub fn with_tax_system(mut self, system: TaxSystem) -> Self {
-        self.tax_system = system;
         self
     }
 }
@@ -1668,6 +1668,9 @@ pub fn run_portfolio_backtest_taxed(
 
         // A buy may be a wash-sale replacement for a recent loss — back the
         // disallowed loss out of the pool (it moves into the new lot's basis).
+        // ponytail: a loss settled at a year boundary before a January repurchase
+        // isn't washed (the prior year already settled) — a known edge within the
+        // 30-day window, not handled.
         if wash && delta > 1e-9 {
             let (st_off, lt_off) = portfolio.wash_replacement(ticker, bar.date, delta, bar.close);
             year_st += st_off;
@@ -1696,7 +1699,8 @@ pub fn run_portfolio_backtest_taxed(
         let t = settle_year(tax, year_st, year_lt, loss_carry, dq, do_).0;
         (t, year_st + year_lt + dq + do_)
     };
-    if tax.system != TaxSystem::None {
+    // Skip the final push for an empty run (no bars → no real year to report).
+    if tax.system != TaxSystem::None && acct_year.is_some() {
         tax_per_year.push(YearTax { year: last_year, gain: final_gain, tax: final_tax });
     }
     if final_tax != 0.0 {
@@ -2195,6 +2199,13 @@ mod tests {
         cfg.taxable_income = 96_000.0;
         let (tax, _) = settle_year(&cfg, 0.0, 0.0, 0.0, 1_000.0, 500.0);
         assert!((tax - (1_000.0 * 0.15 + 500.0 * 0.22)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn empty_run_under_tax_reports_no_year_rows() {
+        let us = TaxConfig::preset(TaxSystem::UsFederal);
+        let r = run_portfolio_backtest_taxed("X", &[], &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &[], &us, None);
+        assert!(r.tax_per_year.is_empty(), "no bogus year-0 row on an empty run");
     }
 
     #[test]
