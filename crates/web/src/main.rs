@@ -1449,7 +1449,9 @@ fn App() -> impl IntoView {
                                                 style="flex:none;display:inline-flex;align-items:center;gap:5px;padding:6px 10px;background:transparent;border:2px solid var(--paper-300);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;font-weight:600;color:var(--text-muted);">
                                                 <Icon name="x".to_string() size=14 /> "Remove"
                                             </button>
-                                            <button type="button" aria-label="Collapse tax simulation"
+                                            <button type="button"
+                                                aria-expanded=(!collapsed).to_string()
+                                                aria-label=if collapsed { "Expand tax simulation" } else { "Collapse tax simulation" }
                                                 on:click=move |_| tax_collapsed.update(|c| *c = !*c)
                                                 style="flex:none;display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;background:transparent;border:2px solid var(--paper-300);border-radius:var(--radius-sm);cursor:pointer;color:var(--text-muted);">
                                                 <Icon name=if collapsed { "chevron-down".to_string() } else { "chevron-up".to_string() } size=16 />
