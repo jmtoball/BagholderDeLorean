@@ -236,6 +236,14 @@ await step('Tax simulation — configurator affordances + after-tax results', as
   await page.waitForFunction(() => document.body.innerText.toLowerCase().includes('overall tax rate'), undefined, { timeout: 5000 });
   ok('German knobs + rate callout disclosed');
 
+  // "Sell everything at the end" toggle renders, default On. The switch is a
+  // sibling of the label, so target the row (label's 2nd ancestor div).
+  const sellAllBox = page.locator('span:text-is("Sell everything at the end")')
+    .locator('xpath=ancestor::div[2]').locator('input[type="checkbox"]').first();
+  if (await sellAllBox.count() === 0) fail('sell-all toggle missing');
+  else if (!(await sellAllBox.isChecked())) fail('sell-all toggle not On by default');
+  else ok('sell-all toggle renders, default On');
+
   // Collapse button a11y: aria-expanded reflects state, label swaps.
   const collapseBtn = page.getByRole('button', { name: 'Collapse tax simulation' });
   if ((await collapseBtn.getAttribute('aria-expanded')) !== 'true') fail('aria-expanded not "true" when open');
@@ -246,13 +254,25 @@ await step('Tax simulation — configurator affordances + after-tax results', as
   else ok('aria-expanded="false" + label flips on collapse');
   await expandBtn.click(); // re-expand for the run below
 
+  // Run with sell-all ON (default), capture the after-tax final value.
+  const afterTaxValue = () => page.getByText('After-tax value', { exact: true })
+    .locator('xpath=following-sibling::span[1]').innerText();
   await runBtn().click();
   await waitForResult(30000);
   const body = await bodyLower();
   if (!body.includes('what you actually keep') && !body.includes('total tax paid'))
     fail('after-tax section did not render');
   else ok('after-tax results rendered');
+  const onValue = await afterTaxValue();
   await shot('10b-tax-de');
+
+  // Toggle sell-all OFF, re-run, assert the after-tax number changes.
+  await sellAllBox.uncheck({ force: true });
+  await runBtn().click();
+  await waitForResult(30000);
+  const offValue = await afterTaxValue();
+  if (onValue === offValue) fail(`sell-all Off did not change the after-tax value (${onValue})`);
+  else ok(`sell-all Off changed after-tax value (${onValue} → ${offValue})`);
 
   // Remove the tax sim so later steps run pre-tax.
   await page.getByRole('button', { name: 'Remove tax simulation' }).click();

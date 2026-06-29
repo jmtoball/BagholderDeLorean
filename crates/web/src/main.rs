@@ -244,12 +244,13 @@ fn de_knobs(
 
 /// Build the `&tax_*` query suffix for the backtest URL. Empty for "none";
 /// otherwise carries the active system's knobs.
-fn tax_query(system: &str, income: f64, church: bool, allowance: f64, estimate: bool, teilfrei: f64, vorab: bool) -> String {
+#[allow(clippy::too_many_arguments)]
+fn tax_query(system: &str, income: f64, church: bool, allowance: f64, estimate: bool, teilfrei: f64, vorab: bool, sellall: bool) -> String {
     match system {
-        "us" => format!("&tax=us&tax_income={income}"),
+        "us" => format!("&tax=us&tax_income={income}&tax_sellall={sellall}"),
         "de" => format!(
             "&tax=de&tax_church={church}&tax_allowance={allowance}\
-             &tax_estimate={estimate}&tax_teilfrei={teilfrei}&tax_vorab={vorab}"
+             &tax_estimate={estimate}&tax_teilfrei={teilfrei}&tax_vorab={vorab}&tax_sellall={sellall}"
         ),
         _ => String::new(),
     }
@@ -923,6 +924,7 @@ fn App() -> impl IntoView {
     let tax_estimate   = create_rw_signal(false);
     let tax_teilfrei   = create_rw_signal(30.0f64);
     let tax_vorab      = create_rw_signal(true);
+    let tax_sellall    = create_rw_signal(true);
 
     // Fetch universe once on mount for datalist autocomplete.
     let universe = create_resource(
@@ -989,7 +991,7 @@ fn App() -> impl IntoView {
             } else { String::new() };
             let tax_suffix = tax_query(
                 &tax_system.get(), tax_income.get(), tax_church.get(), tax_allowance.get(),
-                tax_estimate.get(), tax_teilfrei.get(), tax_vorab.get(),
+                tax_estimate.get(), tax_teilfrei.get(), tax_vorab.get(), tax_sellall.get(),
             );
             let bench_suffix = format!("{bench_suffix}{tax_suffix}");
             let url = if a == "congress" {
@@ -1429,6 +1431,8 @@ fn App() -> impl IntoView {
                             } else {
                                 let collapsed = tax_collapsed.get();
                                 let header_border = if collapsed { "none" } else { "2px solid var(--ink-800)" };
+                                let sellall_active = tax_sys != "none";
+                                let sellall_de = tax_sys == "de";
                                 let badge = (tax_sys != "none").then(|| {
                                     let lbl = if tax_sys == "us" { "United States" } else { "Germany" };
                                     view! { <BdBadge tone="accent".to_string() soft=true>{lbl}</BdBadge> }
@@ -1470,6 +1474,25 @@ fn App() -> impl IntoView {
                                                         value=tax_sys.clone()
                                                         on_change=Box::new(move |v| tax_system.set(v)) />
                                                 </div>
+                                                {sellall_active.then(move || view! {
+                                                    <div style="display:flex;align-items:center;gap:14px;padding:12px 16px;background:var(--surface-sunken);border:2px solid var(--ink-800);border-radius:var(--radius-md);">
+                                                        <div style="flex:1;">
+                                                            <span style="display:block;font-weight:700;font-size:12.5px;color:var(--text-strong);">"Sell everything at the end"</span>
+                                                            {move || {
+                                                                let on = tax_sellall.get();
+                                                                let copy = if on {
+                                                                    "Liquidate the whole position in the final year \u{2014} all remaining gains get realized and taxed.".to_string()
+                                                                } else if sellall_de {
+                                                                    "Keep holding the bags \u{2014} unrealized gains are never taxed (Vorabpauschale advances still accrue).".to_string()
+                                                                } else {
+                                                                    "Keep holding the bags \u{2014} unrealized gains are never taxed.".to_string()
+                                                                };
+                                                                view! { <span style="display:block;margin-top:2px;font-size:11.5px;color:var(--text-muted);">{copy}</span> }
+                                                            }}
+                                                        </div>
+                                                        {move || { let on = tax_sellall.get(); view! { <BdSwitch checked=on on_change=Box::new(move |v| tax_sellall.set(v)) label=(if on { "On" } else { "Off" }).to_string() /> } }}
+                                                    </div>
+                                                })}
                                                 {(tax_sys == "none").then(|| view! {
                                                     <div style="display:flex;align-items:center;gap:10px;padding:14px 16px;background:var(--surface-sunken);border:2px solid var(--ink-800);border-radius:var(--radius-md);font-size:13px;color:var(--text-muted);">
                                                         <Icon name="minus-circle".to_string() size=16 />
