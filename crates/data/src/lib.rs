@@ -371,6 +371,13 @@ pub const UNIVERSE_FLOOR: f64 = 2.0e9 * 0.7;
 /// without touching the store — so the in-process backfill holds the DB lock only
 /// for the upsert, never across these slow fetches. `None` when the name lacks a
 /// price or a shares-outstanding figure (ETFs, funds, freshly-listed).
+///
+/// ponytail: discards the downloaded bars/fundamentals rather than caching them,
+/// so the first `/api/screen` after a backfill re-fetches the universe (the
+/// "cold universe is slow, cheap thereafter" model still holds — it just isn't
+/// pre-warmed). Caching here would warm the screen but balloon the DB with every
+/// kept name's full history; warm it under the upsert lock if screen latency
+/// matters (#89).
 pub fn compute_universe_row(ticker: &str, cik: i64) -> Result<Option<(f64, Option<String>, Option<String>)>> {
     let (bars, _) = download_ohlcv(ticker)?;
     let Some(last) = bars.last() else { return Ok(None) };
