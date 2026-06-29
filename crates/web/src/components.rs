@@ -275,6 +275,9 @@ pub fn BdInput(
     #[prop(default = String::new())] value: String,
     #[prop(optional)]                placeholder: Option<String>,
     #[prop(optional)]                list: Option<String>,
+    /// Adornment text inside the field, before/after the input (e.g. "$", "%").
+    #[prop(optional)]                prefix: Option<String>,
+    #[prop(optional)]                suffix: Option<String>,
     #[prop(optional)]                on_input: Option<Box<dyn Fn(String) + 'static>>,
 ) -> impl IntoView {
     let (focused, set_focused) = create_signal(false);
@@ -299,6 +302,12 @@ pub fn BdInput(
          font-family:{font_family};font-size:{font_size};color:var(--text-body);"
     );
     let msg = error.clone().or(hint.clone());
+    let adorn_style = format!(
+        "flex:none;font-family:{font_family};font-size:{font_size};\
+         color:var(--text-muted);user-select:none;"
+    );
+    let prefix_el = prefix.map(|p| view! { <span style=adorn_style.clone()>{p}</span> });
+    let suffix_el = suffix.map(|s| view! { <span style=adorn_style.clone()>{s}</span> });
 
     view! {
         <label style="display:flex;flex-direction:column;gap:var(--space-2);">
@@ -308,6 +317,7 @@ pub fn BdInput(
                 </span>
             })}
             <span style=wrap_style>
+                {prefix_el}
                 <input
                     prop:value=value
                     placeholder=placeholder.unwrap_or_default()
@@ -317,6 +327,7 @@ pub fn BdInput(
                     on:blur=move |_| set_focused.set(false)
                     on:input=move |e| { if let Some(ref f) = on_input { f(event_target_value(&e)); } }
                 />
+                {suffix_el}
             </span>
             {msg.map(|m| view! {
                 <span style=format!(
@@ -597,5 +608,64 @@ pub fn BdTag(
             {children()}
             {remove_btn}
         </span>
+    }
+}
+
+// ─── Icon ─────────────────────────────────────────────────────────────────────
+
+/// Inline-SVG icon (Lucide geometry). The brand's documented icon set is Lucide;
+/// the app is WASM so we inline the paths rather than pull a font/CDN. Color via
+/// `currentColor`. Add a `name` arm as new icons are needed.
+#[component]
+pub fn Icon(name: String, #[prop(default = 16)] size: usize) -> impl IntoView {
+    let inner = match name.as_str() {
+        "receipt" => "<path d=\"M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z\"/><path d=\"M16 8h-6\"/><path d=\"M16 12h-6\"/><path d=\"M16 16h-6\"/>",
+        "info" => "<circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"M12 16v-4\"/><path d=\"M12 8h.01\"/>",
+        "plus" => "<path d=\"M5 12h14\"/><path d=\"M12 5v14\"/>",
+        "x" => "<path d=\"M18 6 6 18\"/><path d=\"m6 6 12 12\"/>",
+        "chevron-down" => "<path d=\"m6 9 6 6 6-6\"/>",
+        "chevron-up" => "<path d=\"m18 15-6-6-6 6\"/>",
+        "minus-circle" => "<circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"M8 12h8\"/>",
+        _ => "",
+    };
+    let s = size.to_string();
+    view! {
+        <svg width=s.clone() height=s viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round" inner_html=inner
+             style="display:block;flex:none;" />
+    }
+}
+
+// ─── RateChips ─────────────────────────────────────────────────────────────────
+
+/// One chip in a [`RateChips`] row.
+#[derive(Clone, Debug)]
+pub struct Chip {
+    pub label: String,
+    /// Lit (active) — the bracket/threshold the current inputs land in.
+    pub on: bool,
+}
+
+/// A mono chip row that lights the active option — used to show which tax bracket
+/// an income lands in. Mirrors `RateChips` in `ui_kits/webapp/TaxSim.jsx`.
+#[component]
+pub fn RateChips(chips: Vec<Chip>) -> impl IntoView {
+    view! {
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            {chips.into_iter().map(|c| {
+                let on = c.on;
+                let style = format!(
+                    "font-family:var(--font-mono);font-weight:700;font-size:12px;\
+                     padding:5px 10px;border-radius:999px;border:2px solid {};\
+                     background:{};color:{};box-shadow:{};",
+                    if on { "var(--ink-900)" } else { "var(--paper-300)" },
+                    if on { "var(--accent-soft)" } else { "transparent" },
+                    if on { "var(--ink-900)" } else { "var(--text-faint)" },
+                    if on { "var(--shadow-hard-sm)" } else { "none" },
+                );
+                view! { <span style=style>{c.label}</span> }
+            }).collect_view()}
+        </div>
     }
 }

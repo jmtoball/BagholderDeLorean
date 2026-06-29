@@ -212,28 +212,41 @@ await step('Invalid ticker → error callout', async () => {
 
 // ─── 10b. Tax simulation — selector + after-tax results ──────────────────────
 
-await step('Tax simulation (Germany) → after-tax results', async () => {
+const bodyLower = async () => (await page.locator('body').innerText()).toLowerCase();
+
+await step('Tax simulation — configurator affordances + after-tax results', async () => {
   await actionSelect().selectOption('buyhold');
   await page.waitForTimeout(300);
   await page.locator('input:not([type="checkbox"])').first().fill('AAPL');
-  // Pick Germany in the Tax simulation tabs → German knobs disclose.
+
+  // Collapsed CTA → expand into the "06 · Tax simulation" card.
+  await page.getByText('Set up').click();
+  await page.waitForFunction(() => document.body.innerText.toLowerCase().includes('no tax applied'), undefined, { timeout: 5000 });
+  ok('CTA expanded to the tax card');
+
+  // US: the long-term bracket chip lights from the income. $96k → 15%.
+  await page.locator('button[role="tab"]:has-text("United States")').click();
+  await page.waitForFunction(() => document.body.innerText.toLowerCase().includes('long-term rate'), undefined, { timeout: 5000 });
+  // The lit chip has the accent-soft background; assert a "15%" chip exists.
+  const has15 = (await bodyLower()).includes('15%');
+  if (!has15) fail('US bracket chips did not render'); else ok('US bracket chips render');
+
+  // Germany: the Overall tax rate callout renders.
   await page.locator('button[role="tab"]:has-text("Germany")').click();
-  await page.waitForFunction(
-    () => document.body.innerText.includes('Vorabpauschale'),
-    undefined,
-    { timeout: 5000 },
-  );
-  ok('German tax knobs disclosed');
+  await page.waitForFunction(() => document.body.innerText.toLowerCase().includes('overall tax rate'), undefined, { timeout: 5000 });
+  ok('German knobs + rate callout disclosed');
+
   await runBtn().click();
   await waitForResult(30000);
-  // innerText reflects CSS text-transform (overlines render uppercase) — match case-insensitively.
-  const body = (await page.locator('body').innerText()).toLowerCase();
+  const body = await bodyLower();
   if (!body.includes('what you actually keep') && !body.includes('total tax paid'))
     fail('after-tax section did not render');
   else ok('after-tax results rendered');
   await shot('10b-tax-de');
-  // Reset to None so later steps run pre-tax.
-  await page.locator('button[role="tab"]:has-text("None")').click();
+
+  // Remove the tax sim so later steps run pre-tax.
+  await page.getByRole('button', { name: 'Remove tax simulation' }).click();
+  await page.waitForFunction(() => document.body.innerText.includes('Add tax simulation'), undefined, { timeout: 5000 });
 });
 
 // ─── 11. Screen flow — Low P/E candidates ────────────────────────────────────

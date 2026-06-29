@@ -17,7 +17,7 @@ use chrono::{Datelike, NaiveDate};
 use leptos::*;
 use serde::de::DeserializeOwned;
 
-use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSelect, BdStat, BdSwitch, BdTabs, TabItem};
+use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSelect, BdStat, BdSwitch, BdTabs, Chip, Icon, RateChips, TabItem};
 
 // ─── Chart geometry ───────────────────────────────────────────────────────────
 const W: f64   = 720.0;
@@ -78,6 +78,168 @@ fn action_to_strategy(id: &str) -> &'static str {
 fn is_meme(id: &str) -> bool { matches!(id, "cramer" | "congress" | "short_squeeze") }
 fn timeframe_years(tf: &str) -> u32 {
     match tf { "1y" => 1, "3y" => 3, "5y" => 5, "10y" => 10, _ => 0 }
+}
+
+/// US long-term capital-gains rate for a taxable income (2025 single filer).
+/// Display-only — keep the thresholds in sync with `US_LT_BRACKETS` in core.
+fn us_lt_bracket(income: f64) -> f64 {
+    if income <= 48_350.0 { 0.0 } else if income <= 533_400.0 { 0.15 } else { 0.20 }
+}
+
+// Shared knob-panel styles (mirror KnobGrid / MiniLabel in TaxSim.jsx).
+const KNOB_GRID: &str = "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;padding:16px;background:var(--surface-sunken);border:2px solid var(--ink-800);border-radius:var(--radius-md);";
+const MINI_LABEL: &str = "display:block;font-weight:600;font-size:12.5px;color:var(--text-strong);margin-bottom:7px;";
+const RATE_NUM: &str = "font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-weight:700;font-size:24px;letter-spacing:-0.02em;color:var(--accent);";
+const RATE_CAP: &str = "display:block;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);margin-top:2px;";
+
+/// A muted note row prefixed with an info icon (TaxSim.jsx NoteLine).
+fn note_line(text: &str) -> View {
+    let t = text.to_string();
+    view! {
+        <div style="display:flex;gap:8px;align-items:flex-start;font-size:12px;color:var(--text-muted);line-height:1.45;">
+            <span style="flex:none;margin-top:1px;color:var(--ink-300);"><Icon name="info".to_string() size=14 /></span>
+            <span>{t}</span>
+        </div>
+    }.into_view()
+}
+
+/// Format a rate to ≤3 decimals, trimming trailing zeros ("26.375", "27.82").
+fn round3(x: f64) -> String {
+    format!("{:.3}", x).trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// US knobs: income + the long-term bracket chips that light from the income,
+/// plus the NIIT chip. Mirrors `UsKnobs` in TaxSim.jsx.
+fn us_knobs(income: RwSignal<f64>) -> View {
+    view! {
+        <div style=KNOB_GRID>
+            <div>
+                <span style=MINI_LABEL>"Annual taxable income"</span>
+                <BdInput mono=true prefix="$".to_string()
+                    value=format!("{:.0}", income.get_untracked())
+                    on_input=Box::new(move |v| { if let Ok(n) = v.replace(',', "").parse::<f64>() { income.set(n.max(0.0)); } }) />
+                <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Sets which long-term bracket and the NIIT cliff apply."</span>
+            </div>
+            <div>
+                <span style=MINI_LABEL>"Long-term rate \u{b7} NIIT"</span>
+                {move || {
+                    let inc = income.get();
+                    let lt = us_lt_bracket(inc);
+                    let chips = vec![
+                        Chip { label: "0%".to_string(), on: lt == 0.0 },
+                        Chip { label: "15%".to_string(), on: lt == 0.15 },
+                        Chip { label: "20%".to_string(), on: lt == 0.20 },
+                    ];
+                    let niit = vec![Chip { label: "+3.8% NIIT".to_string(), on: inc > 200_000.0 }];
+                    view! {
+                        <div style="display:flex;flex-direction:column;gap:8px;">
+                            <RateChips chips=chips />
+                            <RateChips chips=niit />
+                        </div>
+                    }
+                }}
+            </div>
+            <div style="grid-column:1 / -1;display:flex;flex-direction:column;gap:8px;">
+                {note_line("Short- vs long-term holding split is worked out automatically from each trade's holding period.")}
+                {note_line("Wash-sale rule is applied automatically \u{2014} losses on repurchases within 30 days are deferred, no knob needed.")}
+            </div>
+        </div>
+    }.into_view()
+}
+
+/// German knobs: allowance + church/Vorabpauschale switches, the ETF Teilfreistellung
+/// estimate, and an "Overall tax rate" callout (split when the estimate is on).
+/// Mirrors `DeKnobs` in TaxSim.jsx.
+fn de_knobs(
+    allowance: RwSignal<f64>, church: RwSignal<bool>, vorab: RwSignal<bool>,
+    estimate: RwSignal<bool>, teilfrei: RwSignal<f64>,
+) -> View {
+    view! {
+        <div style="display:flex;flex-direction:column;gap:14px;">
+            <div style=KNOB_GRID>
+                <div>
+                    <span style=MINI_LABEL>"Tax-free allowance"</span>
+                    <BdInput mono=true prefix="\u{20ac}".to_string()
+                        value=format!("{:.0}", allowance.get_untracked())
+                        on_input=Box::new(move |v| { if let Ok(n) = v.replace(',', "").parse::<f64>() { allowance.set(n.max(0.0)); } }) />
+                    <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Sparerpauschbetrag \u{2014} exempt per year (\u{20ac}1,000 in 2025)."</span>
+                </div>
+                <div>
+                    <span style=MINI_LABEL>"Church tax"</span>
+                    <div style="display:flex;align-items:center;min-height:var(--control-md);">
+                        {move || { let on = church.get(); view! { <BdSwitch checked=on on_change=Box::new(move |v| church.set(v)) label=(if on { "On" } else { "Off" }).to_string() /> } }}
+                    </div>
+                    <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Adds Kirchensteuer (~+1.4 pts) on top of the base rate."</span>
+                </div>
+            </div>
+
+            <div>
+                <div style="display:flex;align-items:center;gap:7px;margin-bottom:8px;">
+                    <span style="font-weight:700;font-size:10.5px;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);">"ETF rules \u{b7} applied to ETF holdings"</span>
+                    <span style="flex:1;height:2px;background:var(--paper-300);" />
+                </div>
+                <div style=KNOB_GRID>
+                    <div>
+                        <span style=MINI_LABEL>"Teilfreistellung"</span>
+                        {move || {
+                            let on = estimate.get();
+                            let dim = format!("flex:1;opacity:{};pointer-events:{};", if on { "1" } else { "0.45" }, if on { "auto" } else { "none" });
+                            view! {
+                                <div style="display:flex;align-items:center;gap:10px;">
+                                    <BdSwitch checked=on on_change=Box::new(move |v| estimate.set(v)) />
+                                    <div style=dim>
+                                        <BdInput mono=true suffix="%".to_string()
+                                            value=format!("{:.0}", teilfrei.get_untracked())
+                                            on_input=Box::new(move |v| { if let Ok(n) = v.parse::<f64>() { teilfrei.set(n.clamp(0.0, 100.0)); } }) />
+                                    </div>
+                                </div>
+                            }
+                        }}
+                        <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Share of ETF gains exempt (equity ETFs: 30%)."</span>
+                    </div>
+                    <div>
+                        <span style=MINI_LABEL>"Vorabpauschale"</span>
+                        <div style="display:flex;align-items:center;min-height:var(--control-md);">
+                            {move || { let on = vorab.get(); view! { <BdSwitch checked=on on_change=Box::new(move |v| vorab.set(v)) label=(if on { "On" } else { "Off" }).to_string() /> } }}
+                        </div>
+                        <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Taxes a notional advance each year you hold."</span>
+                    </div>
+                </div>
+                <div style="margin-top:10px;">
+                    {note_line("Simplification: ETF rules apply to every ETF position; your direct stocks keep the full rate. Only equity ETFs (\u{2265}51% stocks) actually qualify for the 30% Teilfreistellung \u{2014} bond or low-equity funds get less, or none.")}
+                </div>
+            </div>
+
+            {move || {
+                let (ch, est, tf) = (church.get(), estimate.get(), teilfrei.get());
+                let base = if ch { 27.82 } else { 26.375 };
+                let etf = if est { base * (1.0 - tf / 100.0) } else { base };
+                let breakdown = if est { "Direct holdings pay the full rate; ETF positions get Teilfreistellung relief." }
+                    else if ch { "Abgeltungsteuer 25% + solidarity + church tax." }
+                    else { "Abgeltungsteuer 25% + solidarity surcharge." };
+                let rates = if est {
+                    view! {
+                        <div style="display:flex;gap:22px;align-items:flex-start;text-align:right;">
+                            <div><span style=RATE_NUM>{format!("{}%", round3(base))}</span><span style=RATE_CAP>"Direct stocks"</span></div>
+                            <div style="width:2px;align-self:stretch;background:var(--paper-300);" />
+                            <div><span style=RATE_NUM>{format!("{}%", round3(etf))}</span><span style=RATE_CAP>"ETF holdings"</span></div>
+                        </div>
+                    }.into_view()
+                } else {
+                    view! { <span style="font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-weight:700;letter-spacing:-0.02em;color:var(--accent);font-size:28px;">{format!("{}%", round3(base))}</span> }.into_view()
+                };
+                view! {
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 16px;min-height:88px;box-sizing:border-box;background:var(--surface-sunken);border:2px solid var(--ink-800);border-radius:var(--radius-md);">
+                        <div style="flex:1;">
+                            <span style="display:block;font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"Overall tax rate"</span>
+                            <span style="display:block;margin-top:3px;font-size:11.5px;color:var(--text-muted);">{breakdown}</span>
+                        </div>
+                        {rates}
+                    </div>
+                }
+            }}
+        </div>
+    }.into_view()
 }
 
 /// Build the `&tax_*` query suffix for the backtest URL. Empty for "none";
@@ -752,6 +914,8 @@ fn App() -> impl IntoView {
     let benchmark_strategy = create_rw_signal("buy_and_hold".to_string());
     let show_benchmark     = create_rw_signal(false);
     // Tax configurator state (F6). system: "none" | "us" | "de".
+    let tax_enabled    = create_rw_signal(false);
+    let tax_collapsed  = create_rw_signal(false);
     let tax_system     = create_rw_signal("none".to_string());
     let tax_income     = create_rw_signal(96_000.0f64);
     let tax_church     = create_rw_signal(false);
@@ -1245,79 +1409,78 @@ fn App() -> impl IntoView {
                                 </div>
                             </div>
 
-                            // Tax simulation
-                            <div style="display:flex;flex-direction:column;gap:9px;">
-                                {field_heading(None, "Tax simulation", Some("What does the taxman leave you?"))}
-                                <BdTabs full_width=true
-                                    items=vec![
-                                        TabItem { value: "none".to_string(), label: "None".to_string() },
-                                        TabItem { value: "us".to_string(), label: "United States".to_string() },
-                                        TabItem { value: "de".to_string(), label: "Germany".to_string() },
-                                    ]
-                                    value=tax_sys.clone()
-                                    on_change=Box::new(move |v| tax_system.set(v)) />
-                                {(tax_sys == "us").then(|| view! {
-                                    <div style="max-width:280px;margin-top:4px;">
-                                        <BdInput mono=true label="Annual taxable income $".to_string()
-                                            placeholder="96000".to_string()
-                                            value=format!("{:.0}", tax_income.get_untracked())
-                                            on_input=Box::new(move |v| {
-                                                if let Ok(n) = v.replace(',', "").parse::<f64>() { tax_income.set(n.max(0.0)); }
-                                            }) />
-                                        <p style="margin:6px 0 0;font-size:11.5px;color:var(--text-muted);line-height:1.45;">
-                                            "Sets the long-term bracket and the NIIT cliff. Short-vs-long-term and the wash-sale rule are handled automatically."
-                                        </p>
-                                    </div>
-                                })}
-                                {(tax_sys == "de").then(|| view! {
-                                    <div style="display:flex;flex-direction:column;gap:12px;margin-top:4px;">
-                                        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;align-items:end;">
-                                            <div style="max-width:200px;">
-                                                <BdInput mono=true label="Tax-free allowance \u{20ac}".to_string()
-                                                    placeholder="1000".to_string()
-                                                    value=format!("{:.0}", tax_allowance.get_untracked())
-                                                    on_input=Box::new(move |v| {
-                                                        if let Ok(n) = v.replace(',', "").parse::<f64>() { tax_allowance.set(n.max(0.0)); }
-                                                    }) />
-                                            </div>
-                                            <div style="height:var(--control-md);display:flex;align-items:center;">
-                                                <BdSwitch checked=tax_church.get()
-                                                    on_change=Box::new(move |v| tax_church.set(v))
-                                                    label="Church tax".to_string() />
-                                            </div>
-                                            <div style="height:var(--control-md);display:flex;align-items:center;">
-                                                <BdSwitch checked=tax_vorab.get()
-                                                    on_change=Box::new(move |v| tax_vorab.set(v))
-                                                    label="Vorabpauschale".to_string() />
-                                            </div>
-                                        </div>
-                                        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-                                            <BdSwitch checked=tax_estimate.get()
-                                                on_change=Box::new(move |v| tax_estimate.set(v))
-                                                label="Treat ETFs as equity funds".to_string() />
-                                            {tax_estimate.get().then(|| view! {
-                                                <div style="width:120px;">
-                                                    <BdInput mono=true label="Teilfreistellung %".to_string()
-                                                        value=format!("{:.0}", tax_teilfrei.get_untracked())
-                                                        on_input=Box::new(move |v| {
-                                                            if let Ok(n) = v.parse::<f64>() { tax_teilfrei.set(n.clamp(0.0, 100.0)); }
-                                                        }) />
+                            // Tax simulation — collapsed CTA → expandable "06" card (TaxSim.jsx)
+                            {if !tax_enabled.get() {
+                                view! {
+                                    <button type="button" on:click=move |_| tax_enabled.set(true)
+                                        style="width:100%;display:flex;align-items:center;gap:14px;text-align:left;cursor:pointer;padding:14px 18px;background:var(--surface-card);border:2px dashed var(--ink-300);border-radius:var(--radius-md);color:var(--text-body);">
+                                        <span style="flex:none;width:38px;height:38px;border-radius:var(--radius-sm);background:var(--surface-sunken);border:2px solid var(--ink-800);display:flex;align-items:center;justify-content:center;color:var(--accent);">
+                                            <Icon name="receipt".to_string() size=20 />
+                                        </span>
+                                        <span style="flex:1;">
+                                            <span style="display:block;font-weight:700;font-size:14.5px;color:var(--text-strong);">"Add tax simulation"</span>
+                                            <span style="display:block;font-size:12.5px;color:var(--text-muted);">"See what you actually keep after the taxman \u{2014} U.S. or German capital-gains rules."</span>
+                                        </span>
+                                        <span style="flex:none;display:inline-flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:var(--accent);">
+                                            "Set up" <Icon name="plus".to_string() size=16 />
+                                        </span>
+                                    </button>
+                                }.into_view()
+                            } else {
+                                let collapsed = tax_collapsed.get();
+                                let header_border = if collapsed { "none" } else { "2px solid var(--ink-800)" };
+                                let badge = (tax_sys != "none").then(|| {
+                                    let lbl = if tax_sys == "us" { "United States" } else { "Germany" };
+                                    view! { <BdBadge tone="accent".to_string() soft=true>{lbl}</BdBadge> }
+                                });
+                                view! {
+                                    <div style="border:2px solid var(--ink-800);border-radius:var(--radius-md);background:var(--surface-card);box-shadow:var(--shadow-hard-sm);overflow:hidden;">
+                                        <div style=format!("display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:{header_border};background:var(--surface-sunken);")>
+                                            <div style="flex:1;">
+                                                <div style="display:flex;align-items:center;gap:7px;min-height:24px;">
+                                                    <span style="font-family:var(--font-mono);font-weight:700;font-size:11px;color:var(--accent);">"06"</span>
+                                                    <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);white-space:nowrap;">"Tax simulation"</span>
+                                                    {badge}
                                                 </div>
-                                            })}
+                                                <span style="font-size:11.5px;color:var(--text-muted);font-style:italic;">"What does the taxman leave you?"</span>
+                                            </div>
+                                            <button type="button" aria-label="Remove tax simulation"
+                                                on:click=move |_| { tax_enabled.set(false); tax_collapsed.set(false); tax_system.set("none".to_string()); }
+                                                style="flex:none;display:inline-flex;align-items:center;gap:5px;padding:6px 10px;background:transparent;border:2px solid var(--paper-300);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;font-weight:600;color:var(--text-muted);">
+                                                <Icon name="x".to_string() size=14 /> "Remove"
+                                            </button>
+                                            <button type="button" aria-label="Collapse tax simulation"
+                                                on:click=move |_| tax_collapsed.update(|c| *c = !*c)
+                                                style="flex:none;display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;background:transparent;border:2px solid var(--paper-300);border-radius:var(--radius-sm);cursor:pointer;color:var(--text-muted);">
+                                                <Icon name=if collapsed { "chevron-down".to_string() } else { "chevron-up".to_string() } size=16 />
+                                            </button>
                                         </div>
-                                        {tax_estimate.get().then(|| view! {
-                                            <p style="margin:0;font-size:11.5px;color:var(--text-muted);line-height:1.45;">
-                                                "Estimate: every ETF is treated as a 30% equity fund. This over-states the exemption for bond or mixed funds."
-                                            </p>
-                                        })}
-                                        {(!tax_estimate.get()).then(|| view! {
-                                            <p style="margin:0;font-size:11.5px;color:var(--text-muted);line-height:1.45;">
-                                                "ETFs are taxed in full \u{2014} no Teilfreistellung exemption \u{2014} until you switch this on."
-                                            </p>
+                                        {(!collapsed).then(|| view! {
+                                            <div style="padding:16px;display:flex;flex-direction:column;gap:16px;">
+                                                <div style="display:flex;flex-direction:column;gap:9px;">
+                                                    {field_heading(None, "Tax system", Some("Pick the regime your gains are taxed under."))}
+                                                    <BdTabs full_width=true
+                                                        items=vec![
+                                                            TabItem { value: "none".to_string(), label: "None".to_string() },
+                                                            TabItem { value: "us".to_string(), label: "United States".to_string() },
+                                                            TabItem { value: "de".to_string(), label: "Germany".to_string() },
+                                                        ]
+                                                        value=tax_sys.clone()
+                                                        on_change=Box::new(move |v| tax_system.set(v)) />
+                                                </div>
+                                                {(tax_sys == "none").then(|| view! {
+                                                    <div style="display:flex;align-items:center;gap:10px;padding:14px 16px;background:var(--surface-sunken);border:2px solid var(--ink-800);border-radius:var(--radius-md);font-size:13px;color:var(--text-muted);">
+                                                        <Icon name="minus-circle".to_string() size=16 />
+                                                        "No tax applied \u{2014} results stay pre-tax, exactly as before."
+                                                    </div>
+                                                })}
+                                                {(tax_sys == "us").then(move || us_knobs(tax_income))}
+                                                {(tax_sys == "de").then(move || de_knobs(tax_allowance, tax_church, tax_vorab, tax_estimate, tax_teilfrei))}
+                                            </div>
                                         })}
                                     </div>
-                                })}
-                            </div>
+                                }.into_view()
+                            }}
 
                             // Run
                             <div style="display:flex;justify-content:flex-end;">
