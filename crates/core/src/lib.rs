@@ -1130,6 +1130,11 @@ pub struct TaxConfig {
     /// DE ETF estimate mode (#61): treat every fund as a 30%-TFS equity fund,
     /// skipping per-fund equity quotas. Opt-in; over-states bond/mixed funds.
     pub estimate_all_etfs_equity: bool,
+    /// Realize every open position's unrealized gain on the final bar and tax it,
+    /// so the after-tax result reflects liquidating today. Default `true`. When
+    /// `false`, terminal unrealized gains stay untaxed (drag-only). Realize-for-tax
+    /// only — no sell trades, no cash debit (honors the #76 external-funding model).
+    pub sell_all: bool,
 }
 
 // US federal rate tables — 2025 single filer (IRS Rev. Proc. 2024-40).
@@ -1176,6 +1181,7 @@ impl TaxConfig {
             etf_teilfreistellung: 0.30,
             vorabpauschale: matches!(system, TaxSystem::Germany),
             estimate_all_etfs_equity: false,
+            sell_all: true,
         }
     }
 
@@ -1689,6 +1695,27 @@ pub fn run_portfolio_backtest_taxed(
         }
     }
 
+    let final_close = bars.last().map(|b| b.close).unwrap_or(0.0);
+
+    // "Sell everything at the end": realize each open lot's terminal unrealized
+    // gain into the final year's pool so it's taxed (US ST/LT + NIIT, DE flat /
+    // fund TFS + §19 Vorabpauschale credit). Realize-for-tax only — no trades, no
+    // cash debit, so the #76 external-funding invariant (buy-and-hold = 1 trade) holds.
+    if tax.sell_all && tax.system != TaxSystem::None {
+        let last_date = bars.last().map(|b| b.date);
+        if let Some(lots) = portfolio.positions.get(ticker) {
+            for lot in lots.iter().filter(|l| l.qty > 0.0) {
+                let gain = lot.qty * (final_close - lot.entry_price);
+                if de_fund {
+                    year_fund_gain += gain;
+                } else {
+                    let held = last_date.map(|d| (d - lot.entry_date).num_days()).unwrap_or(0);
+                    if held > 365 { year_lt += gain } else { year_st += gain }
+                }
+            }
+        }
+    }
+
     // Settle the final (partial) year so its realized gains (and a fund's last
     // Vorabpauschale) aren't left untaxed. The curve is already built, so fold the
     // withholding into the last point. ponytail: the real January-N+1 settlement
@@ -1725,7 +1752,6 @@ pub fn run_portfolio_backtest_taxed(
     let rets: Vec<f64> = curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect();
     let metrics = compute_metrics(&curve, &rets);
 
-    let final_close = bars.last().map(|b| b.close).unwrap_or(0.0);
     let shares = portfolio.shares(ticker);
     let unrealized = portfolio
         .positions
@@ -2175,8 +2201,10 @@ mod tests {
     fn de_fund_buy_and_hold_accrues_vorabpauschale() {
         let bars = rising_2024_bars();
         let fund = FundTax { teilfreistellung: 0.0, distributing: false };
-        // Large stake so the VAP clears the €1,000 allowance.
+        // Large stake so the VAP clears the €1,000 allowance. sell_all off so the
+        // terminal gain isn't realized — this isolates the Vorabpauschale.
         let mut de = TaxConfig::preset(TaxSystem::Germany);
+        de.sell_all = false;
         let with_vap = run_portfolio_backtest_taxed(
             "ETF", &bars, &Strategy::BuyAndHold, 100_000.0, &FillCosts::ZERO, 0.0, &[], &de, Some(&fund),
         );
@@ -2260,6 +2288,7 @@ mod tests {
         }];
         let mut us = TaxConfig::preset(TaxSystem::UsFederal);
         us.taxable_income = 96_000.0;
+        us.sell_all = false; // isolate the drag-only path — no terminal realization
         let r = run_portfolio_backtest_taxed("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &div, &us, None);
         assert_eq!(r.trades.iter().filter(|t| t.action == "sell").count(), 0, "must not sell to pay tax");
         assert_eq!(r.trades.len(), 1, "only the initial buy");
@@ -2267,6 +2296,58 @@ mod tests {
         // The tax shows as an equity drag: after-tax final < the untaxed run.
         let pre = run_portfolio_backtest("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &div);
         assert!(r.curve.last().unwrap().equity < pre.curve.last().unwrap().equity);
+    }
+
+    #[test]
+    fn taxed_sell_all_realizes_terminal_gain() {
+        // Buy-and-hold ends 2024 holding a large unrealized gain (100 → 200).
+        let bars = rising_2024_bars();
+        let mut on = TaxConfig::preset(TaxSystem::UsFederal); // sell_all true by default
+        on.taxable_income = 96_000.0;
+        let off = TaxConfig { sell_all: false, ..on.clone() };
+        let r_on = run_portfolio_backtest_taxed("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &[], &on, None);
+        let r_off = run_portfolio_backtest_taxed("X", &bars, &Strategy::BuyAndHold, 10_000.0, &FillCosts::ZERO, 0.0, &[], &off, None);
+        // ON realizes the terminal gain → tax > 0 and a lower after-tax final than OFF.
+        assert!(r_on.total_tax > 0.0, "terminal gain is taxed");
+        assert_eq!(r_off.total_tax, 0.0, "OFF leaves the unrealized gain untaxed");
+        assert!(r_on.curve.last().unwrap().equity < r_off.curve.last().unwrap().equity);
+        // No spurious trades either way — the #75/#76 invariant holds.
+        assert_eq!(r_on.trades.iter().filter(|t| t.action == "sell").count(), 0);
+        assert_eq!(r_on.trades.len(), 1);
+        assert_eq!(r_off.trades.len(), 1);
+    }
+
+    #[test]
+    fn taxed_sell_all_realizes_de_fund_terminal_gain_crediting_vap() {
+        // A DE fund held across 2024–25 (nonzero Basiszins both years) accrues a
+        // Vorabpauschale each year; sell_all realizes the terminal gain — TFS-exempt
+        // and reduced by the §19 VAP credit already taxed (not double-counted).
+        let bars: Vec<Bar> = [
+            ("2024-01-15", 100.0), ("2024-06-15", 130.0), ("2024-12-15", 160.0),
+            ("2025-06-15", 200.0), ("2025-12-15", 240.0),
+        ].iter().map(|(d, c)| bar(d, *c)).collect();
+        let fund = FundTax { teilfreistellung: 0.30, distributing: false };
+        let mut on = TaxConfig::preset(TaxSystem::Germany);
+        on.annual_allowance = 0.0; // isolate the realization arithmetic
+        let off = TaxConfig { sell_all: false, ..on.clone() };
+        let amount = 100_000.0;
+        let r_on = run_portfolio_backtest_taxed("ETF", &bars, &Strategy::BuyAndHold, amount, &FillCosts::ZERO, 0.0, &[], &on, Some(&fund));
+        let r_off = run_portfolio_backtest_taxed("ETF", &bars, &Strategy::BuyAndHold, amount, &FillCosts::ZERO, 0.0, &[], &off, Some(&fund));
+
+        assert_eq!(r_on.trades.len(), 1, "fund buy-and-hold stays 1 trade");
+        assert_eq!(r_off.trades.len(), 1);
+        assert!(r_off.total_tax > 0.0, "Vorabpauschale accrues either way");
+        assert!(r_on.total_tax > r_off.total_tax, "terminal gain adds tax");
+        assert!(r_on.curve.last().unwrap().equity < r_off.curve.last().unwrap().equity);
+
+        // The terminal-gain tax (the increment over the VAP-only run) must be LESS
+        // than taxing the raw gain at the full TFS rate — proof the §19 VAP credit
+        // reduced the gain rather than stacking on top.
+        let term_tax = r_on.total_tax - r_off.total_tax;
+        let raw_gain = (amount / 100.0) * (240.0 - 100.0); // shares × terminal Δprice
+        let no_credit = raw_gain * (1.0 - 0.30) * 0.26375;
+        assert!(term_tax > 0.0 && term_tax < no_credit,
+            "term_tax {term_tax} should be < no-credit {no_credit} (VAP credited)");
     }
 
     // A rise through 2020 then a 2021 crash, so an SMA crossover enters long and

@@ -71,6 +71,8 @@ struct BacktestQuery {
     tax_teilfrei: Option<f64>,
     /// DE: accrue the Vorabpauschale (default on for DE).
     tax_vorab: Option<bool>,
+    /// Realize + tax all open positions on the final bar (default on).
+    tax_sellall: Option<bool>,
 }
 
 /// Map the `tax=` query value to a `TaxSystem`; anything unrecognized = None.
@@ -273,6 +275,7 @@ async fn backtest(
     if let Some(v) = q.tax_allowance { tax_cfg.annual_allowance = v; }
     if let Some(v) = q.tax_estimate { tax_cfg.estimate_all_etfs_equity = v; }
     if let Some(v) = q.tax_vorab { tax_cfg.vorabpauschale = v; }
+    if let Some(v) = q.tax_sellall { tax_cfg.sell_all = v; }
     let tfs_frac = q.tax_teilfrei.map(|p| p / 100.0).unwrap_or(0.30);
     // Flag the ticker as a German fund (→ Vorabpauschale; Teilfreistellung only
     // when the estimate toggle is on). A direct stock stays `None`.
