@@ -17,7 +17,7 @@ use chrono::{Datelike, NaiveDate};
 use leptos::*;
 use serde::de::DeserializeOwned;
 
-use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSelect, BdStat, BdSwitch, BdTabs, Chip, Icon, RateChips, TabItem};
+use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSelect, BdStat, BdSwitch, BdTabs, Chip, Icon, Overline, RateChips, TabItem};
 
 // ─── Chart geometry ───────────────────────────────────────────────────────────
 const W: f64   = 720.0;
@@ -954,6 +954,14 @@ fn field_heading(step: Option<&str>, title: &str, question: Option<&str>) -> Vie
     }.into_view()
 }
 
+/// Smooth-scroll a stacked section into view by id. `html { scroll-behavior:
+/// smooth }` (ds.css) animates it; Run jumps to Simulation, Back to Config.
+fn scroll_to(id: &str) {
+    if let Some(el) = document().get_element_by_id(id) {
+        el.scroll_into_view();
+    }
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 
 #[component]
@@ -1188,30 +1196,51 @@ fn App() -> impl IntoView {
                     </div>
                 </div>
             </div>
-            // Scroll-down link (native anchor → smooth scroll, no JS)
-            <a href="#app" aria-label="Scroll to the app"
+            // Scroll-down link (native anchor → smooth scroll, no JS) → Gallery section
+            <a href="#gallery" aria-label="Scroll to enter the gallery"
                style="position:relative;z-index:2;align-self:center;margin-bottom:18px;\
                       display:inline-flex;flex-direction:column;align-items:center;gap:2px;\
                       color:var(--text-on-ink-muted);text-decoration:none;\
                       font-family:var(--font-mono);font-size:var(--text-micro);letter-spacing:0.1em;\
                       text-transform:uppercase;">
-                "Run one yourself"
+                "Scroll to enter the gallery"
                 <span style="font-size:20px;line-height:1;animation:bd-bob 1.6s var(--ease-out) infinite;">"⌄"</span>
             </a>
         </section>
 
-        <main id="app" style="min-height:100vh;border-top:var(--border-bold) solid var(--ink-900);\
-                              background:var(--surface-page);">
-        <div style="max-width:1080px;margin:0 auto;padding:44px var(--gutter) 90px;\
+        // ── Gallery (placeholder — the wall of curated runs lands in #94) ─────
+        <section id="gallery" style="min-height:100vh;display:flex;flex-direction:column;\
+                       justify-content:center;padding:84px 56px;box-sizing:border-box;\
+                       background:var(--surface-page);border-top:var(--border-bold) solid var(--ink-900);">
+            <div style="max-width:1320px;margin:0 auto;width:100%;">
+                <Overline>"Gallery of broken dreams"</Overline>
+                <h2 style="font-family:var(--font-display);font-weight:800;font-size:36px;\
+                           line-height:1.02;letter-spacing:-0.02em;color:var(--text-strong);margin:12px 0 8px;">
+                    "A wall of broken dreams is coming"
+                </h2>
+                <p style="font-size:15px;color:var(--text-muted);margin:0;max-width:560px;">
+                    "Curated backtests and your saved runs will live here. For now, scroll on \
+                     to build one yourself."
+                </p>
+            </div>
+        </section>
+
+        // ── Configuration ────────────────────────────────────────────────────
+        <section id="config" class="bd-grain" style="position:relative;overflow:hidden;\
+                       min-height:100vh;display:flex;flex-direction:column;justify-content:center;\
+                       padding:84px 56px;box-sizing:border-box;background:var(--teal-700);\
+                       border-top:var(--border-bold) solid var(--ink-900);">
+        <div style="position:relative;z-index:1;max-width:1320px;margin:0 auto;width:100%;\
                     display:flex;flex-direction:column;gap:var(--space-5);">
 
             // Section intro
-            <header style="display:flex;flex-direction:column;align-items:center;text-align:center;">
-                <h2 style="font-family:var(--font-display);font-weight:800;font-size:32px;\
-                           letter-spacing:-0.02em;color:var(--text-strong);margin:0 0 6px;">
-                    "Run a backtest"
+            <header style="display:flex;flex-direction:column;">
+                <Overline style="color:var(--accent-soft);margin-bottom:8px;">"Configure"</Overline>
+                <h2 style="font-family:var(--font-display);font-weight:800;font-size:36px;\
+                           line-height:1.02;letter-spacing:-0.02em;color:var(--paper-50);margin:0;">
+                    "Build a backtest"
                 </h2>
-                <p style="font-size:14.5px;color:var(--text-muted);margin:0;">
+                <p style="font-size:15px;color:var(--text-on-ink-muted);margin:8px 0 0;">
                     "Choose what you trade and how you trade it, then send it back in time."
                 </p>
             </header>
@@ -1223,7 +1252,10 @@ fn App() -> impl IntoView {
                 </datalist>
             })}
 
-            <BdCard padding="22px".to_string()>
+            // Two-concern panel (left) + benchmark/tax add-ons (reserved right column)
+            <div style="display:grid;grid-template-columns:minmax(0,1.5fr) minmax(340px,1fr);\
+                        gap:18px;align-items:start;">
+            <BdCard padding="26px".to_string()>
             <section style="display:flex;flex-direction:column;gap:var(--space-4);">
 
                 // ── Two concern panels ────────────────────────────────────────
@@ -1409,85 +1441,127 @@ fn App() -> impl IntoView {
                     })
                 }}
 
-                // ── Amount · Timeframe · Benchmark · Run ──────────────────────
+                // ── Amount + Timeframe ────────────────────────────────────────
                 {move || {
-                    let a        = action.get();
-                    let has_p03  = matches!(a.as_str(), "sma"|"golden"|"btfd"|"pairs"|"sectorrot"|"congress");
-                    let step     = if has_p03 { "04" } else { "03" };
-                    let prst     = is_preset(&a);
-                    let scr      = sel_method.get() == "screen" && !prst;
-                    let is_busy  = busy.get();
-                    let show_bm  = show_benchmark.get();
-                    let tax_sys  = tax_system.get();
-                    let lbl      = if is_busy { "Running\u{2026}" } else if prst { "Run preset" } else if scr { "Run screen" } else { "Run backtest" };
+                    let a       = action.get();
+                    let has_p03 = matches!(a.as_str(), "sma"|"golden"|"btfd"|"pairs"|"sectorrot"|"congress");
+                    let step    = if has_p03 { "04" } else { "03" };
                     view! {
-                        <div style="display:flex;flex-direction:column;gap:var(--space-4);">
-                            // Amount + Timeframe
-                            <div style="display:grid;\
-                                        grid-template-columns:repeat(auto-fit,minmax(220px,1fr));\
-                                        gap:14px;align-items:end;">
-                                <div style="display:flex;flex-direction:column;gap:9px;max-width:220px;">
-                                    {field_heading(None, "Amount $", Some("How much do you put in?"))}
-                                    <BdInput mono=true placeholder="10000".to_string()
-                                        value=format!("{:.0}", initial_amount.get_untracked())
-                                        on_input=Box::new(move |v| {
-                                            if let Ok(n) = v.parse::<f64>() {
-                                                if n > 0.0 { initial_amount.set(n); }
-                                            }
-                                        }) />
-                                </div>
-                                <div style="display:flex;flex-direction:column;gap:9px;">
-                                    {field_heading(Some(step), "Timeframe", Some("How far back?"))}
-                                    <BdTabs full_width=true
-                                        items=["1y","3y","5y","10y","Max"].iter().map(|t| TabItem {
-                                            value: t.to_string(), label: t.to_string()
-                                        }).collect()
-                                        value=timeframe.get()
-                                        on_change=Box::new(move |v| timeframe.set(v)) />
-                                    // Forward projection — a horizon input, companion to "how far back?".
-                                    {move || {
-                                        let on = project_fwd.get();
-                                        view! {
-                                            <div style="display:flex;align-items:center;gap:10px;margin-top:2px;">
-                                                <BdSwitch checked=on on_change=Box::new(move |v| project_fwd.set(v))
-                                                    label=(if on { "Project forward" } else { "Backtest only" }).to_string() />
-                                                <span style="font-size:11.5px;color:var(--text-muted);font-style:italic;">"…and how far forward? (matches the backtest span)"</span>
-                                            </div>
+                        <div style="display:grid;\
+                                    grid-template-columns:repeat(auto-fit,minmax(220px,1fr));\
+                                    gap:14px;align-items:end;">
+                            <div style="display:flex;flex-direction:column;gap:9px;max-width:220px;">
+                                {field_heading(None, "Amount $", Some("How much do you put in?"))}
+                                <BdInput mono=true placeholder="10000".to_string()
+                                    value=format!("{:.0}", initial_amount.get_untracked())
+                                    on_input=Box::new(move |v| {
+                                        if let Ok(n) = v.parse::<f64>() {
+                                            if n > 0.0 { initial_amount.set(n); }
                                         }
-                                    }}
-                                </div>
+                                    }) />
                             </div>
-
-                            // Benchmark
                             <div style="display:flex;flex-direction:column;gap:9px;">
-                                {field_heading(None, "Benchmark", Some("Compare against what?"))}
-                                <div style="display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;\
-                                            min-height:var(--control-md);">
-                                    <div style="height:var(--control-md);display:flex;align-items:center;">
-                                        <BdSwitch checked=show_bm
-                                            on_change=Box::new(move |v| show_benchmark.set(v))
-                                            label="Compare vs.".to_string() />
+                                {field_heading(Some(step), "Timeframe", Some("How far back?"))}
+                                <BdTabs full_width=true
+                                    items=["1y","3y","5y","10y","Max"].iter().map(|t| TabItem {
+                                        value: t.to_string(), label: t.to_string()
+                                    }).collect()
+                                    value=timeframe.get()
+                                    on_change=Box::new(move |v| timeframe.set(v)) />
+                                // Forward projection — a horizon input, companion to "how far back?".
+                                {move || {
+                                    let on = project_fwd.get();
+                                    view! {
+                                        <div style="display:flex;align-items:center;gap:10px;margin-top:2px;">
+                                            <BdSwitch checked=on on_change=Box::new(move |v| project_fwd.set(v))
+                                                label=(if on { "Project forward" } else { "Backtest only" }).to_string() />
+                                            <span style="font-size:11.5px;color:var(--text-muted);font-style:italic;">"…and how far forward? (matches the backtest span)"</span>
+                                        </div>
+                                    }
+                                }}
+                            </div>
+                        </div>
+                    }
+                }}
+
+                // ── Run ───────────────────────────────────────────────────────
+                {move || {
+                    let a       = action.get();
+                    let prst    = is_preset(&a);
+                    let scr     = sel_method.get() == "screen" && !prst;
+                    let is_busy = busy.get();
+                    let lbl     = if is_busy { "Running\u{2026}" } else if prst { "Run preset" } else if scr { "Run screen" } else { "Run backtest" };
+                    view! {
+                        <div style="display:flex;justify-content:flex-end;">
+                            <BdButton variant="primary".to_string() size="lg".to_string()
+                                disabled=is_busy
+                                on_click=Box::new(move || { run(); scroll_to("simulation"); })>
+                                {lbl}
+                            </BdButton>
+                        </div>
+                    }
+                }}
+            </section>
+            </BdCard>
+
+            // ── Add-ons (reserved right column): benchmark + tax ──────────────
+            <div style="display:flex;flex-direction:column;gap:18px;">
+
+                // Benchmark — OptionalPanel disclosure
+                {move || {
+                    if !show_benchmark.get() {
+                        view! {
+                            <button type="button" on:click=move |_| show_benchmark.set(true)
+                                style="width:100%;display:flex;align-items:center;gap:14px;text-align:left;cursor:pointer;padding:14px 18px;background:var(--surface-card);border:2px dashed var(--ink-300);border-radius:var(--radius-md);color:var(--text-body);">
+                                <span style="flex:none;width:38px;height:38px;border-radius:var(--radius-sm);background:var(--surface-sunken);border:2px solid var(--ink-800);display:flex;align-items:center;justify-content:center;color:var(--accent);">
+                                    <Icon name="bar-chart-3".to_string() size=20 />
+                                </span>
+                                <span style="flex:1;">
+                                    <span style="display:block;font-weight:700;font-size:14.5px;color:var(--text-strong);">"Add a benchmark"</span>
+                                    <span style="display:block;font-size:12.5px;color:var(--text-muted);">"Overlay an index or asset to beat \u{2014} compare your strategy against buy-and-hold."</span>
+                                </span>
+                                <span style="flex:none;display:inline-flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:var(--accent);">
+                                    "Add" <Icon name="plus".to_string() size=16 />
+                                </span>
+                            </button>
+                        }.into_view()
+                    } else {
+                        view! {
+                            <div style="border:2px solid var(--ink-800);border-radius:var(--radius-md);background:var(--surface-card);box-shadow:var(--shadow-hard-sm);overflow:hidden;">
+                                <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:2px solid var(--ink-800);background:var(--surface-sunken);">
+                                    <div style="flex:1;min-width:0;">
+                                        <div style="display:flex;align-items:center;gap:7px;min-height:24px;">
+                                            <span style="font-family:var(--font-mono);font-weight:700;font-size:11px;color:var(--accent);">"05"</span>
+                                            <span style="font-weight:700;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);white-space:nowrap;">"Benchmark"</span>
+                                        </div>
+                                        <span style="font-size:11.5px;color:var(--text-muted);font-style:italic;">"Compare against what?"</span>
                                     </div>
-                                    {show_bm.then(|| view! {
-                                        <div style="width:130px;">
-                                            <BdInput mono=true label="vs. ticker".to_string()
-                                                placeholder="SPY".to_string()
-                                                value=benchmark_ticker.get()
-                                                on_input=Box::new(move |v| benchmark_ticker.set(v.trim().to_uppercase())) />
-                                        </div>
-                                        <div style="flex:1 1 200px;min-width:180px;max-width:300px;">
-                                            <BdSelect label="vs. strategy".to_string()
-                                                on_change=Box::new(move |v| benchmark_strategy.set(v))>
-                                                <option value="buy_and_hold">"Buy and hold"</option>
-                                                <option value="sma_crossover">"SMA crossover (20/50)"</option>
-                                            </BdSelect>
-                                        </div>
-                                    })}
+                                    <button type="button" aria-label="Remove benchmark"
+                                        on:click=move |_| show_benchmark.set(false)
+                                        style="flex:none;display:inline-flex;align-items:center;gap:5px;padding:6px 10px;background:transparent;border:2px solid var(--paper-300);border-radius:var(--radius-sm);cursor:pointer;font-size:12px;font-weight:600;color:var(--text-muted);">
+                                        <Icon name="x".to_string() size=14 /> "Remove"
+                                    </button>
+                                </div>
+                                <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
+                                    <BdInput mono=true label="vs. ticker".to_string()
+                                        placeholder="SPY".to_string()
+                                        value=benchmark_ticker.get()
+                                        on_input=Box::new(move |v| benchmark_ticker.set(v.trim().to_uppercase())) />
+                                    <BdSelect label="vs. strategy".to_string()
+                                        on_change=Box::new(move |v| benchmark_strategy.set(v))>
+                                        <option value="buy_and_hold">"Buy and hold"</option>
+                                        <option value="sma_crossover">"SMA crossover (20/50)"</option>
+                                    </BdSelect>
                                 </div>
                             </div>
+                        }.into_view()
+                    }
+                }}
 
-                            // Tax simulation — collapsed CTA → expandable "06" card (TaxSim.jsx)
-                            {if !tax_enabled.get() {
+                // Tax simulation — collapsed CTA → expandable "06" card (TaxSim.jsx)
+                {move || {
+                            let tax_sys = tax_system.get();
+                            if !tax_enabled.get() {
                                 view! {
                                     <button type="button" on:click=move |_| tax_enabled.set(true)
                                         style="width:100%;display:flex;align-items:center;gap:14px;text-align:left;cursor:pointer;padding:14px 18px;background:var(--surface-card);border:2px dashed var(--ink-300);border-radius:var(--radius-md);color:var(--text-body);">
@@ -1580,40 +1654,71 @@ fn App() -> impl IntoView {
                                         })}
                                     </div>
                                 }.into_view()
-                            }}
+                            }
+                        }}
+            </div>
+            </div>
+        </div>
+        </section>
 
-                            // Run
-                            <div style="display:flex;justify-content:flex-end;">
-                                <BdButton variant="primary".to_string() size="lg".to_string()
-                                    disabled=is_busy on_click=Box::new(run)>
-                                    {lbl}
-                                </BdButton>
-                            </div>
-                        </div>
-                    }
+        // ── Simulation ────────────────────────────────────────────────────────
+        <section id="simulation" style="min-height:100vh;display:flex;flex-direction:column;\
+                       padding:84px 56px 56px;box-sizing:border-box;background:var(--surface-sunken);\
+                       border-top:var(--border-bold) solid var(--ink-900);">
+            <header style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px;\
+                           margin:0 auto 22px;max-width:1320px;width:100%;flex-wrap:wrap;">
+                <div>
+                    <Overline>"Simulation"</Overline>
+                    <h2 style="font-family:var(--font-display);font-weight:800;font-size:36px;\
+                               line-height:1.02;letter-spacing:-0.02em;color:var(--text-strong);margin:0;">
+                        "The verdict"
+                    </h2>
+                </div>
+                {move || {
+                    let ran = single_result.get().is_some() || candidates.get().is_some();
+                    (ran && !busy.get()).then(|| view! {
+                        <BdButton variant="secondary".to_string() size="md".to_string()
+                            on_click=Box::new(|| scroll_to("config"))>
+                            <Icon name="sliders-horizontal".to_string() size=16 /> "Back to configure"
+                        </BdButton>
+                    })
                 }}
-            </section>
-            </BdCard>
+            </header>
+            <div style=move || {
+                let ran = single_result.get().is_some() || candidates.get().is_some();
+                let justify = if ran && !busy.get() { "flex-start" } else { "center" };
+                format!("flex:1;min-height:0;max-width:1320px;width:100%;margin:0 auto;\
+                         display:flex;flex-direction:column;justify-content:{justify};")
+            }>
 
             // ── Results ───────────────────────────────────────────────────────
             {move || {
                 let is_busy = busy.get();
                 match (single_result.get(), candidates.get()) {
-                    (None, None) if is_busy => view! {
-                        <BdCard><div style="text-align:center;padding:var(--space-6) var(--space-4);">
-                            <span style="display:inline-block;width:32px;height:32px;\
-                                         border-radius:var(--radius-full);\
-                                         border:4px solid var(--paper-300);border-top-color:var(--accent);\
-                                         animation:bd-spin 0.8s linear infinite;margin-bottom:var(--space-4);" />
-                            <p style="font-family:var(--font-display);font-weight:var(--weight-bold);\
-                                      font-size:var(--text-lg);color:var(--text-strong);margin:0 0 var(--space-1);">
-                                "Spinning up the flux capacitor\u{2026}"
-                            </p>
-                            <p style="font-size:var(--text-sm);color:var(--text-muted);margin:0;">
-                                "Replaying the tape tick by tick."
-                            </p>
-                        </div></BdCard>
-                    }.into_view(),
+                    (None, None) if is_busy => {
+                        // Screen runs warm ~20 names from the net; ticker runs replay one tape.
+                        let screen = sel_method.get() == "screen" && !is_preset(&action.get());
+                        let (title, sub) = if screen {
+                            ("Warming up \u{2014} first run takes a moment", "Fetching \u{223c}20 stocks from across the timeline.")
+                        } else {
+                            ("Spinning up the flux capacitor\u{2026}", "Replaying the tape tick by tick.")
+                        };
+                        view! {
+                            <BdCard><div style="text-align:center;padding:var(--space-6) var(--space-4);">
+                                <span style="display:inline-block;width:34px;height:34px;\
+                                             border-radius:var(--radius-full);\
+                                             border:4px solid var(--paper-300);border-top-color:var(--accent);\
+                                             animation:bd-spin 0.8s linear infinite;margin-bottom:var(--space-4);" />
+                                <p style="font-family:var(--font-display);font-weight:var(--weight-bold);\
+                                          font-size:var(--text-lg);color:var(--text-strong);margin:0 0 var(--space-1);">
+                                    {title}
+                                </p>
+                                <p style="font-size:var(--text-sm);color:var(--text-muted);margin:0;">
+                                    {sub}
+                                </p>
+                            </div></BdCard>
+                        }.into_view()
+                    },
 
                     (Some(Err(e)), _) => view! {
                         <BdCallout tone="loss".to_string() title="That didn\u{2019}t work".to_string()>{e}</BdCallout>
@@ -1798,21 +1903,27 @@ fn App() -> impl IntoView {
                             <span style="display:inline-flex;width:56px;height:56px;\
                                          border-radius:var(--radius-full);background:var(--surface-sunken);\
                                          border:var(--border-line) solid var(--ink-800);color:var(--ink-500);\
-                                         align-items:center;justify-content:center;font-size:var(--text-title);\
-                                         margin-bottom:var(--space-3);">"\u{23EA}"</span>
+                                         align-items:center;justify-content:center;\
+                                         margin-bottom:14px;">
+                                <Icon name="rewind".to_string() size=26 />
+                            </span>
                             <p style="font-family:var(--font-display);font-weight:var(--weight-bold);\
-                                      font-size:var(--text-lg);color:var(--text-strong);margin:0 0 var(--space-1);">
-                                "Define a strategy and run."
+                                      font-size:20px;color:var(--text-strong);margin:0 0 var(--space-1);">
+                                "Nothing run yet."
                             </p>
-                            <p style="font-size:var(--text-sm);margin:0;">
-                                "Pick your inputs above, then send them back in time."
+                            <p style="font-size:13.5px;color:var(--text-muted);margin:0 0 18px;">
+                                "Open a backtest from the gallery or build one, then send it back in time."
                             </p>
+                            <BdButton variant="secondary".to_string() size="md".to_string()
+                                on_click=Box::new(|| scroll_to("config"))>
+                                <Icon name="sliders-horizontal".to_string() size=16 /> "Go to the configurator"
+                            </BdButton>
                         </div></BdCard>
                     }.into_view(),
                 }
             }}
-        </div>
-        </main>
+            </div>
+        </section>
 
         <footer style="background:var(--teal-800);border-top:var(--border-bold) solid var(--ink-900);">
             <div style="max-width:860px;margin:0 auto;padding:18px var(--gutter);\

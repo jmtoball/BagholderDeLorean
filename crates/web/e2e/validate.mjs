@@ -83,8 +83,8 @@ await step('App loads', async () => {
   );
   ok(`WASM mounted — h1: "${await page.locator('h1').first().textContent()}"`);
 
-  // Backtest section + config must scroll into view (hero is full-height above it).
-  await page.locator('#app').scrollIntoViewIfNeeded();
+  // Stacked flow: the Config screen is its own full-screen section below Hero/Gallery.
+  await page.locator('#config').scrollIntoViewIfNeeded();
 
   const text = await page.locator('body').innerText();
   if (!text.includes('STOCK SELECTION')) fail('concern panel 01 missing');
@@ -97,6 +97,28 @@ await step('App loads', async () => {
   else ok(`action select has ${opts.length} options incl. "Buy & Hold"`);
 
   await shot('01-load');
+});
+
+// ─── 1b. Stacked screens — Config & Simulation are separate sections ─────────
+
+await step('Config and Simulation are distinct full-screen sections (#93)', async () => {
+  // Config section: teal "Configure" screen with the two-concern panel.
+  await page.locator('#config').scrollIntoViewIfNeeded();
+  const cfg = await page.locator('#config').innerText();
+  if (!/configure/i.test(cfg) || !/build a backtest/i.test(cfg)) fail('Config header missing');
+  else ok('Config screen renders "Configure / Build a backtest"');
+  await shot('1b-config-screen');
+
+  // Simulation section: "The verdict" with the empty state before any run.
+  await page.locator('#simulation').scrollIntoViewIfNeeded();
+  const sim = await page.locator('#simulation').innerText();
+  if (!/the verdict/i.test(sim)) fail('Simulation header "The verdict" missing');
+  else ok('Simulation screen renders "The verdict"');
+  if (!/nothing run yet/i.test(sim)) fail('Simulation empty state missing');
+  else ok('Simulation shows the empty state before any run');
+  await shot('1b-simulation-empty');
+
+  await page.locator('#config').scrollIntoViewIfNeeded();
 });
 
 // ─── 2. Buy & Hold — default AAPL 10y ────────────────────────────────────────
@@ -112,6 +134,12 @@ await step('Buy & Hold (AAPL, 10y)', async () => {
     if (!body.includes(label)) fail(`results missing "${label}" metric`);
     else ok(`results show "${label}"`);
   }
+  // #93: results render inside the Simulation section, with a "Back to configure" control.
+  const sim = await page.locator('#simulation').innerText();
+  if (!sim.toUpperCase().includes('TOTAL RETURN')) fail('results did not land in the Simulation section');
+  else ok('results render inside the Simulation section');
+  if (!/back to configure/i.test(sim)) fail('"Back to configure" control missing after a run');
+  else ok('"Back to configure" control present after a run');
   await shot('02-buyhold');
 });
 
