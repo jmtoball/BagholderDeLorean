@@ -1721,13 +1721,19 @@ fn App() -> impl IntoView {
                     },
 
                     (Some(Err(e)), _) => view! {
-                        <BdCallout tone="loss".to_string() title="That didn\u{2019}t work".to_string()>{e}</BdCallout>
+                        <BdCallout tone="loss".to_string() icon="alert-triangle".to_string()
+                            title="That didn\u{2019}t work".to_string()>{e}</BdCallout>
                     }.into_view(),
 
-                    (Some(Ok(r)), _) => equity_single(&r, action_label(&action.get())),
+                    (Some(Ok(r)), _) => view! {
+                        <div class="bd-fade" style="width:100%;">
+                            {equity_single(&r, action_label(&action.get()))}
+                        </div>
+                    }.into_view(),
 
                     (None, Some(Err(e))) => view! {
-                        <BdCallout tone="loss".to_string() title="The screen choked".to_string()>{e}</BdCallout>
+                        <BdCallout tone="loss".to_string() icon="alert-triangle".to_string()
+                            title="The screen choked".to_string()>{e}</BdCallout>
                     }.into_view(),
 
                     (None, Some(Ok(cands))) => {
@@ -1775,7 +1781,7 @@ fn App() -> impl IntoView {
                         }).collect_view();
 
                         view! {
-                            <div style="display:flex;flex-direction:column;gap:18px;">
+                            <div class="bd-fade" style="display:flex;flex-direction:column;gap:18px;">
                                 {is_busy.then(|| view! {
                                     <BdCallout tone="neutral".to_string() title="Warming up\u{2026}".to_string()>
                                         "First run fetches \u{223c}23 names from the internet \u{2014} about 2 minutes. Cached after that."

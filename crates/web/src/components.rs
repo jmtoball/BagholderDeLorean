@@ -232,9 +232,11 @@ pub fn BdStat(
 pub fn BdCallout(
     #[prop(default = "neutral".to_string())] tone: String,
     #[prop(optional)]                        title: Option<String>,
+    /// Optional leading icon (registry name), tinted with the tone's bar color.
+    #[prop(optional)]                        icon: Option<String>,
     children: Children,
 ) -> impl IntoView {
-    let (bg, _bar, fg) = match tone.as_str() {
+    let (bg, bar, fg) = match tone.as_str() {
         "accent" => ("var(--accent-soft)", "var(--accent)", "var(--rust-700)"),
         "gain"   => ("var(--gain-200)",    "var(--gain)",   "var(--gain-600)"),
         "loss"   => ("var(--loss-200)",    "var(--loss)",   "var(--loss-600)"),
@@ -249,6 +251,11 @@ pub fn BdCallout(
     );
     view! {
         <div role="note" style=style>
+            {icon.map(|name| view! {
+                <span style=format!("color:{bar};flex:none;margin-top:1px;")>
+                    <Icon name=name size=20 />
+                </span>
+            })}
             <div style="display:flex;flex-direction:column;gap:2px;min-width:0;">
                 {title.map(|t| view! {
                     <span style=format!(
