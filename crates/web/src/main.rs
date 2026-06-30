@@ -76,6 +76,12 @@ fn action_to_strategy(id: &str) -> &'static str {
     }
 }
 fn is_meme(id: &str) -> bool { matches!(id, "cramer" | "congress" | "short_squeeze") }
+/// A "screen" run (rank a universe) rather than a single-ticker run. Presets
+/// define their own selection, so they're never screen runs. Single source of
+/// truth shared by `run()`, the Run-button label, and the loading copy.
+fn is_screen_run(sel_method: &str, action: &str) -> bool {
+    sel_method == "screen" && !is_preset(action)
+}
 fn timeframe_years(tf: &str) -> u32 {
     match tf { "1y" => 1, "3y" => 3, "5y" => 5, "10y" => 10, _ => 0 }
 }
@@ -1015,7 +1021,7 @@ fn App() -> impl IntoView {
     let run = move || {
         let a    = action.get();
         let prst = is_preset(&a);
-        let use_screen = sel_method.get() == "screen" && !prst;
+        let use_screen = is_screen_run(&sel_method.get(), &a);
         single_result.set(None);
 
         if prst {
@@ -1253,8 +1259,7 @@ fn App() -> impl IntoView {
             })}
 
             // Two-concern panel (left) + benchmark/tax add-ons (reserved right column)
-            <div style="display:grid;grid-template-columns:minmax(0,1.5fr) minmax(340px,1fr);\
-                        gap:18px;align-items:start;">
+            <div class="bd-config-grid" style="display:grid;gap:18px;align-items:start;">
             <BdCard padding="26px".to_string()>
             <section style="display:flex;flex-direction:column;gap:var(--space-4);">
 
@@ -1488,7 +1493,7 @@ fn App() -> impl IntoView {
                 {move || {
                     let a       = action.get();
                     let prst    = is_preset(&a);
-                    let scr     = sel_method.get() == "screen" && !prst;
+                    let scr     = is_screen_run(&sel_method.get(), &a);
                     let is_busy = busy.get();
                     let lbl     = if is_busy { "Running\u{2026}" } else if prst { "Run preset" } else if scr { "Run screen" } else { "Run backtest" };
                     view! {
@@ -1697,7 +1702,7 @@ fn App() -> impl IntoView {
                 match (single_result.get(), candidates.get()) {
                     (None, None) if is_busy => {
                         // Screen runs warm ~20 names from the net; ticker runs replay one tape.
-                        let screen = sel_method.get() == "screen" && !is_preset(&action.get());
+                        let screen = is_screen_run(&sel_method.get(), &action.get());
                         let (title, sub) = if screen {
                             ("Warming up \u{2014} first run takes a moment", "Fetching \u{223c}20 stocks from across the timeline.")
                         } else {

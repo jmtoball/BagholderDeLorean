@@ -181,6 +181,14 @@ html { scroll-behavior: smooth; }
   .bd-hero-art  { order: -1; }
 }
 
+/* Config screen: concern panel + reserved add-on column. Fixed two-up on wide
+   viewports (the prototype layout); collapses to one column on narrow screens
+   so the section never overflows its overflow:hidden bounds. */
+.bd-config-grid { grid-template-columns: minmax(0, 1.5fr) minmax(340px, 1fr); }
+@media (max-width: 880px) {
+  .bd-config-grid { grid-template-columns: 1fr; }
+}
+
 @keyframes bd-rise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
 @keyframes bd-pop  { from { opacity: 0; transform: rotate(-3deg) scale(0.94); } to { opacity: 1; transform: rotate(-3deg) scale(1); } }
 @keyframes bd-chip { from { opacity: 0; transform: translateY(10px) rotate(3deg); } to { opacity: 1; transform: translateY(0) rotate(3deg); } }
