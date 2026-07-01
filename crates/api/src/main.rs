@@ -18,7 +18,7 @@ use bagholder_core::{
     pairs_alloc, pe_history, pe_series, run_event_backtest, run_signals_backtest, squeeze_signals,
     run_multi_asset_backtest,
     run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate, CongressTrade,
-    run_portfolio_backtest_taxed, is_fund_type, project_forward,
+    run_portfolio_backtest_taxed, is_fund_type, project_forward, terminal_sell_all_tax,
     run_savings_plan, savings_plan_gain_returns, SavingsPlan,
     CorporateAction, FillCosts, FundTax, Fundamental, PeHistory, RebalanceConfig, Strategy, TaxConfig, TaxSystem, SECTOR_ETFS,
 };
@@ -329,6 +329,36 @@ async fn backtest(
         annual_contribution: q.contribution.unwrap_or(0.0),
         compound: q.compound.unwrap_or(true),
     };
+
+    // Decide *before* the run whether a forward projection will attach, so the
+    // terminal "sell everything" tax fires at the right end. A projection extends
+    // the run when `to_year` reaches past the run window's last year, or the legacy
+    // `project=true` is set. When one will attach and `sell_all` is on, we hold the
+    // position through the backtest (run with `sell_all=false`) and levy the
+    // liquidation tax on each projected band's terminal point instead (below).
+    let run_last_year: Option<u32> = if q.from_year.is_some() || q.to_year.is_some() {
+        bars.iter()
+            .map(|b| b.date.year() as u32)
+            .filter(|y| q.to_year.map(|ty| *y <= ty).unwrap_or(true))
+            .max()
+    } else {
+        bars.last().map(|b| b.date.year() as u32)
+    };
+    let will_project = match (q.to_year, run_last_year) {
+        (Some(ty), Some(ly)) if ty > ly => true,
+        _ => q.project.unwrap_or(false),
+    };
+    // Tax config for the backtest itself: with a projection attaching, defer the
+    // sell-all realization to the projection end (leaving the historical curve on
+    // the held / no-sell path). Without one, `sell_all` stays as configured.
+    let run_tax = if will_project && tax_cfg.sell_all {
+        let mut t = tax_cfg.clone();
+        t.sell_all = false;
+        t
+    } else {
+        tax_cfg.clone()
+    };
+
     let mut result = if is_savings {
         let run_bars = if q.from_year.is_some() || q.to_year.is_some() {
             trim_range(bars, q.from_year, q.to_year)
@@ -336,7 +366,7 @@ async fn backtest(
             trim_years(bars, q.years)
         };
         let dates: Vec<chrono::NaiveDate> = run_bars.iter().map(|b| b.date).collect();
-        let mut r = run_savings_plan(&dates, amount, &sp_plan, &tax_cfg);
+        let mut r = run_savings_plan(&dates, amount, &sp_plan, &run_tax);
         // Pretax baseline (same plan, no tax) so the UI can pair after-tax vs pre-tax.
         if system != TaxSystem::None {
             let pre = run_savings_plan(&dates, amount, &sp_plan, &TaxConfig::default());
@@ -355,7 +385,7 @@ async fn backtest(
         let k = q.pe_index.unwrap_or(0).min(count - 1);
         let (entry_date, entry_pe) = series[minima[count - 1 - k]];
         let trimmed: Vec<Bar> = bars.into_iter().filter(|b| b.date >= entry_date).collect();
-        let mut r = run_portfolio_backtest_taxed(&q.ticker, &trimmed, &strategy, amount, &FillCosts::ZERO, 0.0, &actions, &tax_cfg, fund.as_ref())
+        let mut r = run_portfolio_backtest_taxed(&q.ticker, &trimmed, &strategy, amount, &FillCosts::ZERO, 0.0, &actions, &run_tax, fund.as_ref())
             .with_amount(amount);
         r.entry_date = Some(entry_date);
         r.entry_pe = Some(entry_pe);
@@ -372,7 +402,7 @@ async fn backtest(
             trim_years(bars, q.years)
         };
         let mut r = run_portfolio_backtest_taxed(
-            &q.ticker, &run_bars, &strategy, amount, &FillCosts::ZERO, 0.0, &actions, &tax_cfg, fund.as_ref(),
+            &q.ticker, &run_bars, &strategy, amount, &FillCosts::ZERO, 0.0, &actions, &run_tax, fund.as_ref(),
         ).with_amount(amount);
         attach_pretax(&mut r, system, &q.ticker, &run_bars, &strategy, amount, &actions);
         r
@@ -439,6 +469,26 @@ async fn backtest(
             let mut proj = project_forward(&rets, h);
             for band in [&mut proj.p10, &mut proj.p50, &mut proj.p90] {
                 for v in band.iter_mut() { *v *= last; }
+            }
+            // "Sell everything at the end" fires at the projection's terminal point,
+            // not the last backtest bar: the run was held (`sell_all` off above), so
+            // levy the one-time CG tax on each band's own gain over basis here. Cost
+            // basis = `amount` (normal run) or `initial + contributions` (savings
+            // plan). Reduce in equity-multiple space (`tax / amount`), mirroring the
+            // savings-plan terminal drag.
+            if tax_cfg.sell_all && tax_cfg.system != TaxSystem::None {
+                let basis = if is_savings {
+                    amount + sp_plan.annual_contribution / 252.0
+                        * result.curve.len().saturating_sub(1) as f64
+                } else {
+                    amount
+                };
+                for band in [&mut proj.p10, &mut proj.p50, &mut proj.p90] {
+                    if let Some(term) = band.last_mut() {
+                        let t = terminal_sell_all_tax(basis, *term * amount, &tax_cfg);
+                        *term -= t / amount;
+                    }
+                }
             }
             result.projection = Some(proj);
         }
