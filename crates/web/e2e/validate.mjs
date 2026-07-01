@@ -183,6 +183,69 @@ await step('SectionNav rail lists sections, jumps, and tracks the centred one (#
   await page.waitForTimeout(300);
 });
 
+// ─── 1f. Gallery — tabs, real-backtest cards, collection persistence (#94) ───
+
+await step('Gallery: two tabs, backtested cards, bookmark persistence, open-loads-config (#94)', async () => {
+  // Clean slate for the collection, then reload.
+  await page.evaluate(() => localStorage.removeItem('bdl_webapp_collection_v1'));
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForFunction(() => /baghold/i.test(document.querySelector('h1')?.textContent ?? ''), undefined, { timeout: 15000 });
+  await page.locator('#gallery').scrollIntoViewIfNeeded();
+
+  // Both tabs render.
+  const gal = () => page.locator('#gallery');
+  const tabs = (await gal().locator('button').filter({ hasText: /Gallery of broken dreams|My collection/ }).allInnerTexts()).join('|');
+  if (!/Gallery of broken dreams/.test(tabs) || !/My collection/.test(tabs)) fail('gallery tabs missing');
+  else ok('both gallery tabs render');
+
+  // Empty collection shows the placeholder.
+  await page.getByRole('button', { name: /My collection/ }).click();
+  await page.waitForTimeout(400);
+  if (!/no bags yet/i.test(await gal().innerText())) fail('empty-collection placeholder missing');
+  else ok('empty collection shows the "No bags yet" placeholder');
+
+  // Preset wall: each card runs a real backtest (headline return appears).
+  await page.getByRole('button', { name: /Gallery of broken dreams/ }).click();
+  await page.waitForFunction(
+    () => [...document.querySelectorAll('#gallery article')].filter((a) => /[+−×]\d/.test(a.innerText)).length >= 5,
+    undefined, { timeout: 90000 },
+  );
+  const cards = await gal().locator('article').count();
+  if (cards < 5) fail(`expected ≥5 preset cards, got ${cards}`);
+  else ok(`${cards} preset cards, each with a real backtest`);
+  if (!/meme/i.test(await gal().innerText())) fail('no Meme tag on the wall');
+  else ok('Meme tag renders where applicable');
+  await shot('1f-gallery-presets');
+
+  // Bookmark the first card → it lands in the collection and survives a reload.
+  await gal().locator('article button[aria-label="Save to collection"]').first().click();
+  await page.waitForTimeout(300);
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForFunction(() => /baghold/i.test(document.querySelector('h1')?.textContent ?? ''), undefined, { timeout: 15000 });
+  await page.locator('#gallery').scrollIntoViewIfNeeded();
+  await page.getByRole('button', { name: /My collection/ }).click();
+  await page.waitForTimeout(500);
+  const coll = await gal().locator('article').count();
+  if (coll !== 1) fail(`saved card did not persist across reload (collection has ${coll})`);
+  else ok('bookmarked card persists across reload (localStorage)');
+  await shot('1f-gallery-collection');
+
+  // Opening a card loads its config into the form and scrolls to Config.
+  await page.getByRole('button', { name: /Gallery of broken dreams/ }).click();
+  await page.waitForTimeout(300);
+  await gal().locator('article').first().click();
+  await page.waitForTimeout(800);
+  const top = await page.evaluate(() => document.getElementById('config').getBoundingClientRect().top);
+  if (Math.abs(top) > 6) fail(`opening a card did not scroll to Config (rect.top=${Math.round(top)})`);
+  else ok('opening a card loads config and scrolls to Config');
+
+  // Reset to a clean default for the remaining steps.
+  await page.evaluate(() => localStorage.removeItem('bdl_webapp_collection_v1'));
+  await actionSelect().selectOption('buyhold');
+  await page.waitForTimeout(300);
+  await page.locator('input:not([type="checkbox"])').first().fill('AAPL');
+});
+
 // ─── 2. Buy & Hold — default AAPL 10y ────────────────────────────────────────
 
 await step('Buy & Hold (AAPL, 10y)', async () => {
