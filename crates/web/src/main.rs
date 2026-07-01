@@ -1866,18 +1866,88 @@ fn App() -> impl IntoView {
                     }}
                 </div>
 
-                // ── 03 Parameters (conditional) ───────────────────────────────
+                // ── 03 Timeframe ──────────────────────────────────────────────
+                {move || {
+                    view! {
+                        <div>
+                            <div style="display:flex;flex-direction:column;gap:9px;">
+                                {field_heading(Some("03"), "Timeframe", Some("From which year to which?"))}
+                                // From/To year pickers (#67). A To-year past THIS_YEAR
+                                // projects the tail; the To stepper rings accent + a
+                                // callout replaces the "all historical" caption.
+                                {move || {
+                                    const MIN_START: u32 = 1990;
+                                    let max_project = THIS_YEAR + 30;
+                                    let (fy, ty) = (from_year.get(), to_year.get());
+                                    let projecting = ty > THIS_YEAR;
+                                    let bt_years = THIS_YEAR.min(ty).saturating_sub(fy).max(1);
+                                    view! {
+                                        <div style="display:flex;flex-direction:column;gap:10px;">
+                                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                                                <span style="font-size:11.5px;color:var(--text-muted);min-width:36px;">"From"</span>
+                                                <BdYearStepper value=fy min=MIN_START max=ty.saturating_sub(1)
+                                                    on_change=Callback::new(move |v| from_year.set(v)) />
+                                            </div>
+                                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                                                <span style="font-size:11.5px;color:var(--text-muted);min-width:36px;">"To"</span>
+                                                <BdYearStepper value=ty min=fy + 1 max=max_project
+                                                    tone=(if projecting { "accent" } else { "ink" }).to_string()
+                                                    on_change=Callback::new(move |v| to_year.set(v)) />
+                                            </div>
+                                            {if projecting {
+                                                view! {
+                                                    <div style="display:flex;align-items:flex-start;gap:7px;margin-top:2px;\
+                                                        padding:8px 10px;background:rgba(178,58,28,0.08);\
+                                                        border:1px solid var(--accent);border-radius:var(--radius-sm);">
+                                                        <span style="flex:0 0 auto;margin-top:1px;color:var(--accent);">
+                                                            <Icon name="trending-up".to_string() size=14 />
+                                                        </span>
+                                                        <span style="font-size:11.5px;color:var(--text-muted);line-height:1.45;">
+                                                            {format!("Backtest runs {fy}\u{2013}{THIS_YEAR}; ")}
+                                                            <strong style="color:var(--text-strong);">
+                                                                {format!("{THIS_YEAR}\u{2013}{ty} is projected")}
+                                                            </strong>
+                                                            " \u{2014} a bootstrap forecast, not historical data."
+                                                        </span>
+                                                    </div>
+                                                }.into_view()
+                                            } else {
+                                                view! {
+                                                    <span style="font-size:11.5px;color:var(--text-faint);\
+                                                        font-family:var(--font-mono);margin-top:2px;">
+                                                        {format!("{bt_years}y backtest \u{00b7} all historical")}
+                                                    </span>
+                                                }.into_view()
+                                            }}
+                                        </div>
+                                    }
+                                }}
+                            </div>
+                        </div>
+                    }
+                }}
+
+                // ── 04 Parameters (initial amount + conditional strategy params) ──
+                // Amount always shows (every run needs it) — this gives the field a
+                // home in the Parameters panel instead of floating on its own.
                 {move || {
                     let a = action.get();
-                    let show = matches!(a.as_str(), "sma"|"golden"|"btfd"|"pairs"|"sectorrot"|"congress");
-                    show.then(|| view! {
+                    view! {
                         <div style="display:flex;flex-direction:column;gap:9px;">
                             <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
-                                <span style="font-family:var(--font-mono);font-weight:700;font-size:var(--text-micro);color:var(--accent);">"03"</span>
+                                <span style="font-family:var(--font-mono);font-weight:700;font-size:var(--text-micro);color:var(--accent);">"04"</span>
                                 <span style="font-weight:700;font-size:var(--text-micro);letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"Parameters"</span>
                             </div>
-                            <div style="padding:var(--space-4);background:var(--surface-sunken);\
+                            <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;\
+                                        padding:var(--space-4);background:var(--surface-sunken);\
                                         border:var(--border-line) solid var(--ink-800);border-radius:var(--radius-md);">
+                                <div style="width:150px;">
+                                    <BdInput label="Amount ($)".to_string() mono=true placeholder="10000".to_string()
+                                        value=format!("{:.0}", initial_amount.get_untracked())
+                                        on_input=Box::new(move |v| {
+                                            if let Ok(n) = v.parse::<f64>() { if n > 0.0 { initial_amount.set(n); } }
+                                        }) />
+                                </div>
                                 {match a.as_str() {
                                     "sma" | "golden" => view! {
                                         <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
@@ -1931,8 +2001,8 @@ fn App() -> impl IntoView {
                                                 on_input=Box::new(move |v| top_n.set(v.parse().unwrap_or(3))) />
                                         </div>
                                     }.into_view(),
-                                    _ => view! { // congress
-                                        <div>
+                                    "congress" => view! {
+                                        <div style="max-width:340px;">
                                             <BdSwitch
                                                 checked=realistic.get()
                                                 label=if realistic.get() {
@@ -1947,82 +2017,7 @@ fn App() -> impl IntoView {
                                             </p>
                                         </div>
                                     }.into_view(),
-                                }}
-                            </div>
-                        </div>
-                    })
-                }}
-
-                // ── Amount + Timeframe ────────────────────────────────────────
-                {move || {
-                    let a       = action.get();
-                    let has_p03 = matches!(a.as_str(), "sma"|"golden"|"btfd"|"pairs"|"sectorrot"|"congress");
-                    let step    = if has_p03 { "04" } else { "03" };
-                    view! {
-                        <div style="display:grid;\
-                                    grid-template-columns:repeat(auto-fit,minmax(220px,1fr));\
-                                    gap:14px;align-items:end;">
-                            <div style="display:flex;flex-direction:column;gap:9px;max-width:220px;">
-                                {field_heading(None, "Amount $", Some("How much do you put in?"))}
-                                <BdInput mono=true placeholder="10000".to_string()
-                                    value=format!("{:.0}", initial_amount.get_untracked())
-                                    on_input=Box::new(move |v| {
-                                        if let Ok(n) = v.parse::<f64>() {
-                                            if n > 0.0 { initial_amount.set(n); }
-                                        }
-                                    }) />
-                            </div>
-                            <div style="display:flex;flex-direction:column;gap:9px;">
-                                {field_heading(Some(step), "Timeframe", Some("From which year to which?"))}
-                                // From/To year pickers (#67). A To-year past THIS_YEAR
-                                // projects the tail; the To stepper rings accent + a
-                                // callout replaces the "all historical" caption.
-                                {move || {
-                                    const MIN_START: u32 = 1990;
-                                    let max_project = THIS_YEAR + 30;
-                                    let (fy, ty) = (from_year.get(), to_year.get());
-                                    let projecting = ty > THIS_YEAR;
-                                    let bt_years = THIS_YEAR.min(ty).saturating_sub(fy).max(1);
-                                    view! {
-                                        <div style="display:flex;flex-direction:column;gap:10px;">
-                                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                                                <span style="font-size:11.5px;color:var(--text-muted);min-width:36px;">"From"</span>
-                                                <BdYearStepper value=fy min=MIN_START max=ty.saturating_sub(1)
-                                                    on_change=Callback::new(move |v| from_year.set(v)) />
-                                            </div>
-                                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                                                <span style="font-size:11.5px;color:var(--text-muted);min-width:36px;">"To"</span>
-                                                <BdYearStepper value=ty min=fy + 1 max=max_project
-                                                    tone=(if projecting { "accent" } else { "ink" }).to_string()
-                                                    on_change=Callback::new(move |v| to_year.set(v)) />
-                                            </div>
-                                            {if projecting {
-                                                view! {
-                                                    <div style="display:flex;align-items:flex-start;gap:7px;margin-top:2px;\
-                                                        padding:8px 10px;background:rgba(178,58,28,0.08);\
-                                                        border:1px solid var(--accent);border-radius:var(--radius-sm);">
-                                                        <span style="flex:0 0 auto;margin-top:1px;color:var(--accent);">
-                                                            <Icon name="trending-up".to_string() size=14 />
-                                                        </span>
-                                                        <span style="font-size:11.5px;color:var(--text-muted);line-height:1.45;">
-                                                            {format!("Backtest runs {fy}\u{2013}{THIS_YEAR}; ")}
-                                                            <strong style="color:var(--text-strong);">
-                                                                {format!("{THIS_YEAR}\u{2013}{ty} is projected")}
-                                                            </strong>
-                                                            " \u{2014} a bootstrap forecast, not historical data."
-                                                        </span>
-                                                    </div>
-                                                }.into_view()
-                                            } else {
-                                                view! {
-                                                    <span style="font-size:11.5px;color:var(--text-faint);\
-                                                        font-family:var(--font-mono);margin-top:2px;">
-                                                        {format!("{bt_years}y backtest \u{00b7} all historical")}
-                                                    </span>
-                                                }.into_view()
-                                            }}
-                                        </div>
-                                    }
+                                    _ => view! { <></> }.into_view(),
                                 }}
                             </div>
                         </div>
