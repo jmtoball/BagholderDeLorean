@@ -110,10 +110,14 @@ struct GalleryCfg {
 impl GalleryCfg {
     /// Stable signature for dedupe — mirrors the prototype's `cfgSig`.
     fn sig(&self) -> String {
+        // Every field that distinguishes a run must be in the key, or two configs
+        // that differ only there collide (same id → bookmarking one dedupes the
+        // other). ticker_b is a live dimension for pairs. (Add `screen` here once
+        // screen cards land in #102.)
         format!(
-            "{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}",
             self.sel_method, self.ticker, self.action, self.from_year,
-            self.to_year, self.benchmark, self.realistic
+            self.to_year, self.benchmark, self.realistic, self.ticker_b
         )
     }
     /// The `/api` call whose curve + total return drive this card. Mirrors the
@@ -187,13 +191,15 @@ fn preset_cards() -> Vec<GalleryItem> {
 
 /// Benchmark id (spy/qqq/…) → a plain Yahoo ticker for the config's benchmark input.
 fn bench_ticker(id: &str) -> &'static str {
+    // 6040 = the prototype's synthetic "60/40 portfolio"; AOR (iShares Core Growth
+    // Allocation) is the closest real, tradeable 60/40 fund the engine can load.
     match id { "qqq" => "QQQ", "iwm" => "IWM", "dia" => "DIA", "gld" => "GLD",
-               "btc" => "BTC-USD", _ => "SPY" }
+               "btc" => "BTC-USD", "6040" => "AOR", _ => "SPY" }
 }
 /// Reverse of [`bench_ticker`] for saving the current config.
 fn bench_id(ticker: &str) -> &'static str {
     match ticker { "QQQ" => "qqq", "IWM" => "iwm", "DIA" => "dia", "GLD" => "gld",
-                   "BTC-USD" => "btc", _ => "spy" }
+                   "BTC-USD" => "btc", "AOR" => "6040", _ => "spy" }
 }
 /// A from/to-year span mapped to the nearest timeframe preset (until #67 lands
 /// the year pickers, the config still speaks in `1y/…/Max`).
