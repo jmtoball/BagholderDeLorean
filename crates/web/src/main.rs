@@ -255,6 +255,10 @@ fn us_lt_bracket(income: f64) -> f64 {
 
 // Shared knob-panel styles (mirror KnobGrid / MiniLabel in TaxSim.jsx).
 const KNOB_GRID: &str = "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;padding:16px;background:var(--surface-sunken);border:2px solid var(--ink-800);border-radius:var(--radius-md);";
+// German knobs stay two-up even in the narrow tax column (unlike the US auto-fit
+// grid), so the Abgeltungsteuer panel keeps a compact vertical footprint. Mirrors
+// `pairGrid` in TaxSim.jsx (#105).
+const PAIR_GRID: &str = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding:14px;background:var(--surface-sunken);border:2px solid var(--ink-800);border-radius:var(--radius-md);";
 const MINI_LABEL: &str = "display:block;font-weight:600;font-size:12.5px;color:var(--text-strong);margin-bottom:7px;";
 const RATE_NUM: &str = "font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-weight:700;font-size:24px;letter-spacing:-0.02em;color:var(--accent);";
 const RATE_CAP: &str = "display:block;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);margin-top:2px;";
@@ -322,8 +326,8 @@ fn de_knobs(
     estimate: RwSignal<bool>, teilfrei: RwSignal<f64>,
 ) -> View {
     view! {
-        <div style="display:flex;flex-direction:column;gap:14px;">
-            <div style=KNOB_GRID>
+        <div style="display:flex;flex-direction:column;gap:12px;">
+            <div style=PAIR_GRID>
                 <div>
                     <span style=MINI_LABEL>"Tax-free allowance"</span>
                     <BdInput mono=true prefix="\u{20ac}".to_string()
@@ -345,7 +349,7 @@ fn de_knobs(
                     <span style="font-weight:700;font-size:10.5px;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);">"ETF rules \u{b7} applied to ETF holdings"</span>
                     <span style="flex:1;height:2px;background:var(--paper-300);" />
                 </div>
-                <div style=KNOB_GRID>
+                <div style=PAIR_GRID>
                     <div>
                         <span style=MINI_LABEL>"Teilfreistellung"</span>
                         {move || {
@@ -662,6 +666,19 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     let bag          = r.metrics.max_drawdown < -0.30;
     let opp_pct      = (r.metrics.max_drawdown.abs() * 100.0).round() as i64;
     let mdd_bag      = fmt_pct(r.metrics.max_drawdown);
+    // KPI value tinting (good/bad), mirroring PriceResults.jsx (#105). Return/CAGR
+    // are green when positive; a ratio is green ≥1 and red <0; drawdown reds past
+    // −20%. Final value stays neutral (it's always positive, carries no verdict).
+    let gl = |good: bool| if good { "gain" } else { "loss" }.to_string();
+    let ratio_tone = |v: f64| if v >= 1.0 { "gain" } else if v < 0.0 { "loss" } else { "" }.to_string();
+    let ret_tone      = gl(r.metrics.total_return >= 0.0);
+    let cagr_tone     = gl(r.metrics.cagr >= 0.0);
+    let mdd_tone      = if r.metrics.max_drawdown <= -0.2 { "loss" } else { "" }.to_string();
+    let sharpe_tone   = ratio_tone(r.metrics.sharpe);
+    let sortino_tone  = ratio_tone(r.metrics.sortino);
+    let recovery_val  = if r.metrics.max_drawdown >= 0.0 { f64::INFINITY }
+                        else { r.metrics.recovery_factor };
+    let recovery_tone = ratio_tone(recovery_val);
 
     let gy1 = format!("{:.1}", PAD + (H - PAD * 2.0) * 0.25);
     let gy2 = format!("{:.1}", PAD + (H - PAD * 2.0) * 0.50);
@@ -829,22 +846,22 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                     <BdStat label="Final value".to_string() value=final_str size="sm".to_string() />
                 </BdCard>
                 <BdCard padding="16px".to_string()>
-                    <BdStat label="Total return".to_string() value=total_ret_s size="sm".to_string() />
+                    <BdStat label="Total return".to_string() value=total_ret_s value_tone=ret_tone size="sm".to_string() />
                 </BdCard>
                 <BdCard padding="16px".to_string()>
-                    <BdStat label="CAGR".to_string() value=cagr_str size="sm".to_string() />
+                    <BdStat label="CAGR".to_string() value=cagr_str value_tone=cagr_tone size="sm".to_string() />
                 </BdCard>
                 <BdCard padding="16px".to_string()>
-                    <BdStat label="Max drawdown".to_string() value=mdd_str size="sm".to_string() />
+                    <BdStat label="Max drawdown".to_string() value=mdd_str value_tone=mdd_tone size="sm".to_string() />
                 </BdCard>
                 <BdCard padding="16px".to_string()>
-                    <BdStat label="Sharpe ratio".to_string() value=sharpe_str size="sm".to_string() />
+                    <BdStat label="Sharpe ratio".to_string() value=sharpe_str value_tone=sharpe_tone size="sm".to_string() />
                 </BdCard>
                 <BdCard padding="16px".to_string()>
-                    <BdStat label="Sortino ratio".to_string() value=sortino_str size="sm".to_string() />
+                    <BdStat label="Sortino ratio".to_string() value=sortino_str value_tone=sortino_tone size="sm".to_string() />
                 </BdCard>
                 <BdCard padding="16px".to_string()>
-                    <BdStat label="Recovery factor".to_string() value=recovery_str size="sm".to_string() />
+                    <BdStat label="Recovery factor".to_string() value=recovery_str value_tone=recovery_tone size="sm".to_string() />
                 </BdCard>
             </div>
 
@@ -1625,7 +1642,10 @@ fn App() -> impl IntoView {
         <section id="gallery" style="min-height:100vh;display:flex;flex-direction:column;\
                        justify-content:flex-start;padding:84px 56px;box-sizing:border-box;\
                        background:var(--surface-page);">
-            <div style="max-width:1320px;margin:0 auto;width:100%;">
+            // Full-bleed within the section (only the 56px section padding) — the
+            // prototype's GalleryScreen renders the wall with no 1320 cap (unlike
+            // Hero/Config), so it fills the viewport width. (#105)
+            <div style="width:100%;">
                 // Two-tab header: curated wall × saved collection
                 <div style="display:flex;align-items:flex-end;gap:28px;\
                             border-bottom:2px solid rgba(28,46,52,0.18);flex-wrap:wrap;">
@@ -2188,7 +2208,7 @@ fn App() -> impl IntoView {
                        padding:84px 56px 56px;box-sizing:border-box;background:var(--surface-sunken);\
                        border-top:var(--border-bold) solid var(--ink-900);">
             <header style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px;\
-                           margin:0 auto 22px;max-width:1320px;width:100%;flex-wrap:wrap;">
+                           margin:0 0 22px;width:100%;flex-wrap:wrap;">
                 <div>
                     <Overline>"Simulation"</Overline>
                     <h2 style="font-family:var(--font-display);font-weight:800;font-size:36px;\
@@ -2209,7 +2229,8 @@ fn App() -> impl IntoView {
             <div style=move || {
                 let ran = single_result.get().is_some() || candidates.get().is_some();
                 let justify = if ran && !busy.get() { "flex-start" } else { "center" };
-                format!("flex:1;min-height:0;max-width:1320px;width:100%;margin:0 auto;\
+                // Full-bleed + flex:1 so results fill the section's width and height (#105).
+                format!("flex:1;min-height:0;width:100%;\
                          display:flex;flex-direction:column;justify-content:{justify};")
             }>
 

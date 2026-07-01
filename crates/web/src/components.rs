@@ -176,6 +176,9 @@ pub fn BdStat(
     value: String,
     #[prop(optional)] delta: Option<String>,
     #[prop(optional)] delta_tone: Option<String>,
+    /// Tint the value itself gain/loss/warn (good/bad KPI coloring). Omit to keep
+    /// the default strong ink. Mirrors the DS `Stat`'s `valueTone`.
+    #[prop(optional)] value_tone: Option<String>,
     #[prop(default = "md".to_string())] size: String,
     #[prop(default = false)]            on_dark: bool,
 ) -> impl IntoView {
@@ -199,7 +202,12 @@ pub fn BdStat(
         _      => if on_dark { "var(--text-on-ink-muted)" } else { "var(--text-muted)" },
     };
     let label_color = if on_dark { "var(--text-on-ink-muted)" } else { "var(--text-muted)" };
-    let value_color = if on_dark { "var(--text-on-ink)" }       else { "var(--text-strong)" };
+    let value_color = match value_tone.as_deref() {
+        Some("gain") => "var(--gain)",
+        Some("loss") => "var(--loss)",
+        Some("warn") => "var(--warn)",
+        _ => if on_dark { "var(--text-on-ink)" } else { "var(--text-strong)" },
+    };
 
     view! {
         <div style="display:flex;flex-direction:column;gap:6px;">
