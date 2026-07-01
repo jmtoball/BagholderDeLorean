@@ -24,10 +24,10 @@ page.on('pageerror', (e) => consoleErrors.push(String(e)));
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-// Action picker: BdSelect renders a native <select>; method + timeframe use BdTabs → <button role="tab">
+// Action picker: BdSelect renders a native <select>; method uses BdTabs → <button role="tab">.
+// The timeframe is now From/To YearSteppers (#67), driven by ±1/±5 aria-labelled buttons.
 const actionSelect = () => page.locator('select').first();
 const methodTab    = (name)  => page.locator(`button[role="tab"]:has-text("${name}")`);
-const timeframeTab = (label) => page.locator(`button[role="tab"]:has-text("${label}")`);
 const runBtn       = () => page.locator('button[type="button"]:not([role="tab"])').filter({ hasText: /^Ru/ });
 
 async function shot(name) {
@@ -312,15 +312,23 @@ await step('Regime-Filtered Mean Reversion', async () => {
   await shot('06-meanrev');
 });
 
-// ─── 7. Timeframe switch ─────────────────────────────────────────────────────
+// ─── 7. Timeframe — From/To year pickers (#67) ───────────────────────────────
 
-await step('Timeframe 5y', async () => {
+await step('Timeframe year pickers: From −5 slices the window', async () => {
   await actionSelect().selectOption('buyhold');
-  await timeframeTab('5y').click();
+  // Two YearSteppers (From, To); pull From back 5 years via its −5 button.
+  const minus5 = page.locator('button[aria-label="Decrease by 5"]');
+  if (await minus5.count() < 2) fail('year steppers not rendered');
+  else ok('From/To year steppers render');
+  await minus5.first().click(); // From: 2016 → 2011
+  await page.waitForTimeout(150);
+  const cfg = await page.locator('#config').innerText();
+  if (!/all historical/.test(cfg)) fail('backtest caption missing');
+  else ok('backtest window caption renders');
   await runBtn().click();
   await waitForResult();
-  ok('5y result rendered');
-  await shot('07-timeframe-5y');
+  ok('windowed result rendered');
+  await shot('07-timeframe-years');
 });
 
 // ─── 8. Pairs preset — stock selection locked ─────────────────────────────────
@@ -434,18 +442,25 @@ await step('Tax simulation — configurator affordances + after-tax results', as
 
 // ─── 10c. Forward projection fan ─────────────────────────────────────────────
 
-await step('Forward projection draws the cone', async () => {
+await step('Forward projection draws the cone (To-year past this year, #67)', async () => {
   await actionSelect().selectOption('buyhold');
   await page.waitForTimeout(300);
   await page.locator('input:not([type="checkbox"])').first().fill('AAPL');
-  // The "Project forward" switch lives beneath the timeframe tabs.
-  await page.locator('span:text-is("…and how far forward? (matches the backtest span)")')
-    .locator('xpath=ancestor::div[1]').locator('input[type="checkbox"]').first().check({ force: true });
+  // Projection is now driven by a To-year beyond THIS_YEAR — no separate switch.
+  // Push the To-year (2nd stepper) +5 to overshoot the present, and confirm the
+  // accent callout replaces the "all historical" caption.
+  await page.locator('button[aria-label="Increase by 5"]').nth(1).click();
+  await page.waitForTimeout(150);
+  const cfg = await page.locator('#config').innerText();
+  if (!/is projected/.test(cfg)) fail('projecting callout did not appear for a future To-year');
+  else ok('future To-year shows the "is projected" callout');
   await runBtn().click();
   await waitForResult(30000);
   const body = await bodyLower();
   if (!body.includes('1000 bootstrap paths')) fail('projection caption missing');
   else ok('projection caption renders');
+  if (!body.includes('projected horizon')) fail('projected-horizon caption missing');
+  else ok('projection caption shows the year-driven horizon');
   if (!body.includes('projection p10/p50/p90')) fail('projection legend chip missing');
   else ok('projection legend chip renders');
   // The fan band is a <path> filled with --paper-50 at low opacity past the curve.
@@ -453,9 +468,8 @@ await step('Forward projection draws the cone', async () => {
   if (band < 1) fail('projection band path did not render');
   else ok(`projection band renders (${band} path)`);
   await shot('10c-projection');
-  // Toggle back off for later steps.
-  await page.locator('span:text-is("…and how far forward? (matches the backtest span)")')
-    .locator('xpath=ancestor::div[1]').locator('input[type="checkbox"]').first().uncheck({ force: true });
+  // Reset the To-year to this year for later steps.
+  await page.locator('button[aria-label="Decrease by 5"]').nth(1).click();
 });
 
 // ─── 11. Screen flow — Low P/E candidates ────────────────────────────────────

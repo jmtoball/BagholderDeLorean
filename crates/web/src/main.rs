@@ -17,7 +17,7 @@ use chrono::{Datelike, NaiveDate};
 use leptos::*;
 use serde::de::DeserializeOwned;
 
-use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSectionNav, BdSelect, BdSiteFooter, BdStat, BdSwitch, BdTabs, Chip, FooterLink, Icon, Overline, RateChips, TabItem};
+use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSectionNav, BdSelect, BdSiteFooter, BdStat, BdSwitch, BdTabs, BdYearStepper, Chip, FooterLink, Icon, Overline, RateChips, TabItem};
 
 // ─── Chart geometry ───────────────────────────────────────────────────────────
 const W: f64   = 720.0;
@@ -123,7 +123,6 @@ impl GalleryCfg {
     /// The `/api` call whose curve + total return drive this card. Mirrors the
     /// URL-building in `run()` so a card matches what a real run would produce.
     fn backtest_url(&self) -> String {
-        let years = THIS_YEAR.min(self.to_year).saturating_sub(self.from_year).max(1);
         match self.action.as_str() {
             "riskparity" => "/api/preset?kind=risk_parity".to_string(),
             "sectorrot"  => "/api/preset?kind=sector_rotation".to_string(),
@@ -136,9 +135,9 @@ impl GalleryCfg {
                 let strategy = action_to_strategy(&self.action);
                 let (f, sl) = if self.action == "golden" { (50, 200) } else { (20, 50) };
                 format!(
-                    "/api/backtest?ticker={}&strategy={}&fast={}&slow={}&years={}\
+                    "/api/backtest?ticker={}&strategy={}&fast={}&slow={}&from_year={}&to_year={}\
                      &rsi_threshold=20&initial_amount=10000",
-                    self.ticker, strategy, f, sl, years
+                    self.ticker, strategy, f, sl, self.from_year, self.to_year
                 )
             }
         }
@@ -201,13 +200,6 @@ fn bench_id(ticker: &str) -> &'static str {
     match ticker { "QQQ" => "qqq", "IWM" => "iwm", "DIA" => "dia", "GLD" => "gld",
                    "BTC-USD" => "btc", "AOR" => "6040", _ => "spy" }
 }
-/// A from/to-year span mapped to the nearest timeframe preset (until #67 lands
-/// the year pickers, the config still speaks in `1y/…/Max`).
-fn span_to_timeframe(from_year: u32, to_year: u32) -> &'static str {
-    let span = THIS_YEAR.min(to_year).saturating_sub(from_year);
-    if span >= 15 { "Max" } else if span >= 10 { "10y" } else if span >= 5 { "5y" }
-    else if span >= 3 { "3y" } else { "1y" }
-}
 /// "What am I trading" label for a saved item's default title.
 fn subject_label(cfg: &GalleryCfg) -> String {
     if is_preset(&cfg.action) { action_label(&cfg.action).to_string() } else { cfg.ticker.clone() }
@@ -255,10 +247,6 @@ fn ensure_cards(
         });
     }
 }
-fn timeframe_years(tf: &str) -> u32 {
-    match tf { "1y" => 1, "3y" => 3, "5y" => 5, "10y" => 10, _ => 0 }
-}
-
 /// US long-term capital-gains rate for a taxable income (2025 single filer).
 /// Display-only — keep the thresholds in sync with `US_LT_BRACKETS` in core.
 fn us_lt_bracket(income: f64) -> f64 {
@@ -648,6 +636,10 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     let proj_p50   = projection_paths.as_ref().map(|(_, p, _)| p.clone());
     let proj_today = projection_paths.as_ref().map(|(_, _, t)| format!("{:.1}", t));
     let has_projection = projection_paths.is_some();
+    // Projected horizon in years (~252 trading days), for the legend caption (#67).
+    let proj_years = has_projection
+        .then(|| r.projection.as_ref().map(|p| ((p.p50.len().saturating_sub(1)) as f64 / 252.0).round().max(1.0) as u32))
+        .flatten();
     let sep_y1 = format!("{:.0}", PAD);
     let sep_y2 = format!("{:.1}", H - PAD);
 
@@ -913,9 +905,9 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                             </span>
                         })}
                     </div>
-                    {has_projection.then(|| view! {
+                    {proj_years.map(|yrs| view! {
                         <p style="margin:var(--space-2) 0 0;font-family:var(--font-mono);font-size:11px;color:var(--text-on-ink-muted);">
-                            "1000 bootstrap paths · p10/p50/p90 · horizon = backtest length"
+                            {format!("1000 bootstrap paths · p10/p50/p90 · ~{yrs}y projected horizon")}
                         </p>
                     })}
                 </div>
@@ -1295,7 +1287,10 @@ fn App() -> impl IntoView {
     let sel_method  = create_rw_signal("ticker".to_string());
     let screen_kind = create_rw_signal("lowpe".to_string());
     let ticker      = create_rw_signal("AAPL".to_string());
-    let timeframe   = create_rw_signal("10y".to_string());
+    // Calendar window (replaces the timeframe presets + project toggle, #67).
+    // A `to_year` past THIS_YEAR turns the tail into a bootstrap projection.
+    let from_year   = create_rw_signal(2016u32);
+    let to_year     = create_rw_signal(THIS_YEAR);
     let fast          = create_rw_signal(20usize);
     let slow          = create_rw_signal(50usize);
     let rsi_threshold = create_rw_signal(20.0f64);
@@ -1319,7 +1314,6 @@ fn App() -> impl IntoView {
     let tax_teilfrei   = create_rw_signal(30.0f64);
     let tax_vorab      = create_rw_signal(true);
     let tax_sellall    = create_rw_signal(true);
-    let project_fwd    = create_rw_signal(false);
 
     // ── Section-nav rail: which stacked section is centred in the viewport ────
     // Ordered to match the SectionNav pills (Top / Gallery / Config / Simulation).
@@ -1370,14 +1364,13 @@ fn App() -> impl IntoView {
     let saved_sigs = create_memo(move |_| {
         collection.get().iter().map(|it| it.cfg.sig()).collect::<HashSet<String>>()
     });
-    // Current config → a GalleryCfg (span mapped from the timeframe until #67).
+    // Current config → a GalleryCfg (reads the from/to-year window directly, #67).
     let current_cfg = move || {
-        let yrs = timeframe_years(&timeframe.get());
-        let from_year = if yrs == 0 { 1990 } else { THIS_YEAR.saturating_sub(yrs) };
         let a = action.get();
         GalleryCfg {
             sel_method: sel_method.get(), ticker: ticker.get(), action: a.clone(),
-            from_year, to_year: THIS_YEAR, benchmark: bench_id(&benchmark_ticker.get()).to_string(),
+            from_year: from_year.get(), to_year: to_year.get(),
+            benchmark: bench_id(&benchmark_ticker.get()).to_string(),
             realistic: realistic.get(),
             ticker_b: if a == "pairs" { ticker_b.get() } else { String::new() },
         }
@@ -1396,7 +1389,8 @@ fn App() -> impl IntoView {
         benchmark_ticker.set(bench_ticker(&c.benchmark).to_string());
         show_benchmark.set(true);
         realistic.set(c.realistic);
-        timeframe.set(span_to_timeframe(c.from_year, c.to_year).to_string());
+        from_year.set(c.from_year);
+        to_year.set(c.to_year);
         loaded_title.set(Some(item.title.clone()));
         scroll_to("config");
     });
@@ -1482,7 +1476,9 @@ fn App() -> impl IntoView {
         } else {
             let t = ticker.get();
             let a = action.get();
-            let years = timeframe_years(&timeframe.get());
+            // Calendar window (#67): a to_year past THIS_YEAR makes the server
+            // attach a bootstrap projection for the gap — no separate toggle.
+            let window = format!("&from_year={}&to_year={}", from_year.get(), to_year.get());
             let amt = initial_amount.get();
             let bench_suffix = if show_benchmark.get() {
                 let bt = benchmark_ticker.get();
@@ -1493,18 +1489,17 @@ fn App() -> impl IntoView {
                 &tax_system.get(), tax_income.get(), tax_church.get(), tax_allowance.get(),
                 tax_estimate.get(), tax_teilfrei.get(), tax_vorab.get(), tax_sellall.get(),
             );
-            let project_suffix = if project_fwd.get() { "&project=true" } else { "" };
-            let bench_suffix = format!("{bench_suffix}{tax_suffix}{project_suffix}");
+            let bench_suffix = format!("{bench_suffix}{tax_suffix}");
             let url = if a == "congress" {
                 format!(
                     "/api/backtest?ticker={t}&strategy=congress_copy_trade&year=2023\
-                     &use_filing_date={}&years={years}&initial_amount={amt}{bench_suffix}",
+                     &use_filing_date={}{window}&initial_amount={amt}{bench_suffix}",
                     realistic.get()
                 )
             } else if a == "cramer" {
-                format!("/api/backtest?ticker={t}&strategy=cramer_inverse&years={years}&initial_amount={amt}{bench_suffix}")
+                format!("/api/backtest?ticker={t}&strategy=cramer_inverse{window}&initial_amount={amt}{bench_suffix}")
             } else if a == "short_squeeze" {
-                format!("/api/backtest?ticker={t}&strategy=short_squeeze&years={years}&initial_amount={amt}{bench_suffix}")
+                format!("/api/backtest?ticker={t}&strategy=short_squeeze{window}&initial_amount={amt}{bench_suffix}")
             } else {
                 let strategy = action_to_strategy(&a);
                 let f  = if a == "golden" { 50 } else { fast.get() };
@@ -1512,7 +1507,7 @@ fn App() -> impl IntoView {
                 let rsi   = rsi_threshold.get();
                 format!(
                     "/api/backtest?ticker={t}&strategy={strategy}&fast={f}&slow={sl}\
-                     &years={years}&rsi_threshold={rsi}&initial_amount={amt}{bench_suffix}"
+                     {window}&rsi_threshold={rsi}&initial_amount={amt}{bench_suffix}"
                 )
             };
             busy.set(true); candidates.set(None);
@@ -1530,7 +1525,7 @@ fn App() -> impl IntoView {
         let strategy = action_to_strategy(&a);
         let f  = if a == "golden" { 50 } else { fast.get() };
         let sl = if a == "golden" { 200 } else { slow.get() };
-        let years = timeframe_years(&timeframe.get());
+        let window = format!("&from_year={}&to_year={}", from_year.get(), to_year.get());
         let rsi   = rsi_threshold.get();
         let cached: HashSet<String> = pe_hist.get().keys().cloned().collect();
         pe_index.set(k); busy.set(true);
@@ -1541,7 +1536,7 @@ fn App() -> impl IntoView {
                 let url = if use_pe {
                     format!("/api/backtest?ticker={t}&strategy=buy_and_hold&entry=pe_min&pe_index={k}")
                 } else {
-                    format!("/api/backtest?ticker={t}&strategy={strategy}&fast={f}&slow={sl}&years={years}&rsi_threshold={rsi}")
+                    format!("/api/backtest?ticker={t}&strategy={strategy}&fast={f}&slow={sl}{window}&rsi_threshold={rsi}")
                 };
                 if let Ok(r) = get_json::<BacktestResult>(&url).await { out.push((t.clone(), r)); }
                 if use_pe && !cached.contains(&t) {
@@ -1955,21 +1950,54 @@ fn App() -> impl IntoView {
                                     }) />
                             </div>
                             <div style="display:flex;flex-direction:column;gap:9px;">
-                                {field_heading(Some(step), "Timeframe", Some("How far back?"))}
-                                <BdTabs full_width=true
-                                    items=["1y","3y","5y","10y","Max"].iter().map(|t| TabItem {
-                                        value: t.to_string(), label: t.to_string()
-                                    }).collect()
-                                    value=timeframe.get()
-                                    on_change=Box::new(move |v| timeframe.set(v)) />
-                                // Forward projection — a horizon input, companion to "how far back?".
+                                {field_heading(Some(step), "Timeframe", Some("From which year to which?"))}
+                                // From/To year pickers (#67). A To-year past THIS_YEAR
+                                // projects the tail; the To stepper rings accent + a
+                                // callout replaces the "all historical" caption.
                                 {move || {
-                                    let on = project_fwd.get();
+                                    const MIN_START: u32 = 1990;
+                                    let max_project = THIS_YEAR + 30;
+                                    let (fy, ty) = (from_year.get(), to_year.get());
+                                    let projecting = ty > THIS_YEAR;
+                                    let bt_years = THIS_YEAR.min(ty).saturating_sub(fy).max(1);
                                     view! {
-                                        <div style="display:flex;align-items:center;gap:10px;margin-top:2px;">
-                                            <BdSwitch checked=on on_change=Box::new(move |v| project_fwd.set(v))
-                                                label=(if on { "Project forward" } else { "Backtest only" }).to_string() />
-                                            <span style="font-size:11.5px;color:var(--text-muted);font-style:italic;">"…and how far forward? (matches the backtest span)"</span>
+                                        <div style="display:flex;flex-direction:column;gap:10px;">
+                                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                                                <span style="font-size:11.5px;color:var(--text-muted);min-width:36px;">"From"</span>
+                                                <BdYearStepper value=fy min=MIN_START max=ty.saturating_sub(1)
+                                                    on_change=Callback::new(move |v| from_year.set(v)) />
+                                            </div>
+                                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                                                <span style="font-size:11.5px;color:var(--text-muted);min-width:36px;">"To"</span>
+                                                <BdYearStepper value=ty min=fy + 1 max=max_project
+                                                    tone=(if projecting { "accent" } else { "ink" }).to_string()
+                                                    on_change=Callback::new(move |v| to_year.set(v)) />
+                                            </div>
+                                            {if projecting {
+                                                view! {
+                                                    <div style="display:flex;align-items:flex-start;gap:7px;margin-top:2px;\
+                                                        padding:8px 10px;background:rgba(178,58,28,0.08);\
+                                                        border:1px solid var(--accent);border-radius:var(--radius-sm);">
+                                                        <span style="flex:0 0 auto;margin-top:1px;color:var(--accent);">
+                                                            <Icon name="trending-up".to_string() size=14 />
+                                                        </span>
+                                                        <span style="font-size:11.5px;color:var(--text-muted);line-height:1.45;">
+                                                            {format!("Backtest runs {fy}\u{2013}{THIS_YEAR}; ")}
+                                                            <strong style="color:var(--text-strong);">
+                                                                {format!("{THIS_YEAR}\u{2013}{ty} is projected")}
+                                                            </strong>
+                                                            " \u{2014} a bootstrap forecast, not historical data."
+                                                        </span>
+                                                    </div>
+                                                }.into_view()
+                                            } else {
+                                                view! {
+                                                    <span style="font-size:11.5px;color:var(--text-faint);\
+                                                        font-family:var(--font-mono);margin-top:2px;">
+                                                        {format!("{bt_years}y backtest \u{00b7} all historical")}
+                                                    </span>
+                                                }.into_view()
+                                            }}
                                         </div>
                                     }
                                 }}
@@ -2362,7 +2390,8 @@ fn App() -> impl IntoView {
                                     let o = overlay.get();
                                     if o.is_empty() { return view! { <></> }.into_view(); }
                                     let ol = format!("{} · {} · $10,000 each", action_label(&action.get()),
-                                        if pe_entry.get() { "P/E trough entry".to_string() } else { timeframe.get() });
+                                        if pe_entry.get() { "P/E trough entry".to_string() }
+                                        else { format!("{}\u{2013}{}", from_year.get(), THIS_YEAR.min(to_year.get())) });
                                     view! {
                                         <BdCard tone="dark".to_string() overline=ol
                                                 title="Overlaid backtest".to_string()>

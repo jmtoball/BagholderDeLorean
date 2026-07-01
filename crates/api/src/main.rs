@@ -23,6 +23,7 @@ use bagholder_core::{
 };
 use std::collections::HashMap;
 use bagholder_data::Store;
+use chrono::Datelike;
 use serde::Deserialize;
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, services::ServeDir};
 
@@ -38,7 +39,13 @@ struct BacktestQuery {
     fast: Option<usize>,
     slow: Option<usize>,
     /// Trim to the last N years before running; omitted or 0 = full history.
+    /// Legacy lookback window — superseded by `from_year`/`to_year`, kept for back-compat.
     years: Option<u32>,
+    /// Calendar-window start year (inclusive). With `to_year`, slices both ends.
+    from_year: Option<u32>,
+    /// Calendar-window end year (inclusive). When it exceeds the latest historical
+    /// bar's year, the gap is attached as a forward projection (the #66 fan).
+    to_year: Option<u32>,
     /// "pe_min" enters at a local-minimum P/E (overrides `years`).
     entry: Option<String>,
     /// Trough window for `entry=pe_min`, in trading days (default ~a quarter).
@@ -126,6 +133,17 @@ fn trim_years(mut bars: Vec<Bar>, years: Option<u32>) -> Vec<Bar> {
         let cutoff = last.date - chrono::Duration::days(365 * y as i64);
         bars.retain(|b| b.date >= cutoff);
     }
+    bars
+}
+
+/// Slice bars to the calendar window `[from_year, to_year]` (inclusive, by year).
+/// Generalizes `trim_years` (lookback-only) so the window can also end *before*
+/// the latest bar — e.g. 2010→2018 — which `years=` cannot express. Either bound
+/// is optional; a `to_year` past the latest bar simply keeps all later bars
+/// (the caller extends past them with a projection).
+fn trim_range(mut bars: Vec<Bar>, from_year: Option<u32>, to_year: Option<u32>) -> Vec<Bar> {
+    if let Some(fy) = from_year { bars.retain(|b| b.date.year() as u32 >= fy); }
+    if let Some(ty) = to_year { bars.retain(|b| b.date.year() as u32 <= ty); }
     bars
 }
 
@@ -314,7 +332,13 @@ async fn backtest(
         attach_pretax(&mut r, system, &q.ticker, &trimmed, &strategy, amount, &actions);
         r
     } else {
-        let run_bars = trim_years(bars, q.years);
+        // Calendar window [from_year, to_year] when given (slices both ends);
+        // otherwise the legacy trailing `years=` lookback.
+        let run_bars = if q.from_year.is_some() || q.to_year.is_some() {
+            trim_range(bars, q.from_year, q.to_year)
+        } else {
+            trim_years(bars, q.years)
+        };
         let mut r = run_portfolio_backtest_taxed(
             &q.ticker, &run_bars, &strategy, amount, &FillCosts::ZERO, 0.0, &actions, &tax_cfg, fund.as_ref(),
         ).with_amount(amount);
@@ -340,9 +364,14 @@ async fn backtest(
             "sma_crossover" => Strategy::SmaCrossover { fast: 20, slow: 50 },
             _ => Strategy::BuyAndHold,
         };
+        let bench_window = if q.from_year.is_some() || q.to_year.is_some() {
+            trim_range(bench_bars, q.from_year, q.to_year)
+        } else {
+            trim_years(bench_bars, years)
+        };
         let b = run_portfolio_backtest(
             &bt,
-            &trim_years(bench_bars, years),
+            &bench_window,
             &bench_strategy,
             amount,
             &FillCosts::ZERO,
@@ -352,18 +381,29 @@ async fn backtest(
         result.benchmark = Some(Box::new(b));
     }
 
-    // Opt-in forward projection: bootstrap the result's own daily returns and
-    // extend the curve by its own length, scaled back into the curve's equity space.
-    // ponytail: project=true re-runs the backtest to attach the projection; give it
+    // Forward projection: bootstrap the result's own daily returns and extend the
+    // curve, scaled back into the curve's equity space. The horizon is now driven
+    // by `to_year` beyond the latest historical bar — `(to_year − latest year) ×
+    // 252` trading days — falling back to the legacy `project=true` (extend by the
+    // backtest's own length) for older clients.
+    // ponytail: this re-derives the projection from the run's own curve; give it
     // its own endpoint if backtests get expensive.
-    if q.project.unwrap_or(false) && result.curve.len() >= 2 {
-        let rets: Vec<f64> = result.curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect();
-        let last = result.curve.last().map(|p| p.equity).unwrap_or(1.0);
-        let mut proj = project_forward(&rets, result.curve.len());
-        for band in [&mut proj.p10, &mut proj.p50, &mut proj.p90] {
-            for v in band.iter_mut() { *v *= last; }
+    let latest_year = result.curve.last().map(|p| p.date.year() as u32);
+    let horizon = match (q.to_year, latest_year) {
+        (Some(ty), Some(ly)) if ty > ly => Some((ty - ly) as usize * 252),
+        _ if q.project.unwrap_or(false) => Some(result.curve.len()),
+        _ => None,
+    };
+    if let Some(h) = horizon.filter(|h| *h > 0) {
+        if result.curve.len() >= 2 {
+            let rets: Vec<f64> = result.curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect();
+            let last = result.curve.last().map(|p| p.equity).unwrap_or(1.0);
+            let mut proj = project_forward(&rets, h);
+            for band in [&mut proj.p10, &mut proj.p50, &mut proj.p90] {
+                for v in band.iter_mut() { *v *= last; }
+            }
+            result.projection = Some(proj);
         }
-        result.projection = Some(proj);
     }
 
     Ok(Json(result))
