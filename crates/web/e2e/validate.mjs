@@ -157,6 +157,32 @@ await step('Footer renders the redesigned full-bleed SiteFooter (#97)', async ()
   await page.evaluate(() => window.scrollTo(0, 0));
 });
 
+// ─── 1e. SectionNav rail — jump + active tracking (#96) ──────────────────────
+
+await step('SectionNav rail lists sections, jumps, and tracks the centred one (#96)', async () => {
+  const nav = page.locator('nav[aria-label="Sections"]');
+  const labels = (await nav.locator('button').allInnerTexts()).join('|');
+  for (const l of ['TOP', 'GALLERY', 'CONFIG', 'SIMULATION']) {
+    if (!labels.includes(l)) fail(`rail missing "${l}" pill`);
+    else ok(`rail has "${l}" pill`);
+  }
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(500);
+  // Clicking a pill scrolls to that section…
+  await nav.getByRole('button', { name: 'Config' }).click();
+  await page.waitForTimeout(800);
+  const top = await page.evaluate(() => document.getElementById('config').getBoundingClientRect().top);
+  if (Math.abs(top) > 6) fail(`Config pill did not scroll to #config (rect.top=${Math.round(top)})`);
+  else ok('clicking a pill scrolls to that section');
+  // …and the active pill reflects the section centred in the viewport.
+  const active = await nav.locator('button[aria-current="true"]').innerText().catch(() => '');
+  if (!/config/i.test(active)) fail(`active pill not Config (was "${active}")`);
+  else ok('active pill reflects the centred section');
+  await shot('1e-section-nav');
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(300);
+});
+
 // ─── 2. Buy & Hold — default AAPL 10y ────────────────────────────────────────
 
 await step('Buy & Hold (AAPL, 10y)', async () => {

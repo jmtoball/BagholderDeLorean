@@ -10,3 +10,5 @@ serde = { workspace = true }
 leptos = { version = "0.6", features = ["csr"] }
 gloo-net = { version = "0.6", features = ["http"] }
 console_error_panic_hook = "0.1"
+# DomRect: Element::get_bounding_client_rect for the SectionNav active-section tracker.
+web-sys = { version = "0.3", features = ["DomRect"] }
