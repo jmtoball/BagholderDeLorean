@@ -44,6 +44,7 @@ fn action_label(id: &str) -> &'static str {
         "riskparity" => "Risk Parity",
         "sectorrot"  => "Momentum Sector Rotation",
         "cycle"      => "Economic-Cycle Rotation",
+        "savings"    => "Savings Plan",
         "cramer"         => "Inverse Cramer",
         "congress"       => "Congressional Copy-Trade",
         "short_squeeze"  => "Short Squeeze",
@@ -61,6 +62,7 @@ fn action_rationale(id: &str) -> &'static str {
         "riskparity" => "A self-contained multi-asset mix weighted by inverse volatility. Boring on purpose.",
         "sectorrot"  => "Rotate into the top-N sectors by trailing return. Selection and action move together.",
         "cycle"      => "Tilt toward the sectors that tend to lead each phase of the macro cycle.",
+        "savings"    => "No trades, no picks — just a fixed-rate account with contributions. The baseline every strategy has to beat.",
         "cramer"        => "Selection is Cramer's picks; the action is to fade them. Inseparable, by design.",
         "congress"      => "Mirror disclosed politician trades. Naively spectacular — until you wait for the filing date.",
         "short_squeeze" => "Enter when short interest is high and price is rising. Exit when momentum fades.",
@@ -72,6 +74,7 @@ fn action_to_strategy(id: &str) -> &'static str {
         "sma" | "golden" => "sma_crossover",
         "btfd"           => "buy_the_dip",
         "meanrev"        => "regime_mean_reversion",
+        "savings"        => "savings_plan",
         _                => "buy_and_hold",
     }
 }
@@ -1320,6 +1323,11 @@ fn App() -> impl IntoView {
     let ticker_b      = create_rw_signal("PEP".to_string());
     let entry_z       = create_rw_signal(2.0f64);
     let top_n         = create_rw_signal(3usize);
+    // Savings-plan benchmark (#92): annual rate as a percent, compounding toggle,
+    // yearly contribution in dollars. The starting sum reuses `initial_amount`.
+    let savings_rate         = create_rw_signal(7.0f64);
+    let savings_compound     = create_rw_signal(true);
+    let savings_contribution = create_rw_signal(0.0f64);
     let realistic     = create_rw_signal(false);
     let initial_amount     = create_rw_signal(10_000.0f64);
     let benchmark_ticker   = create_rw_signal("SPY".to_string());
@@ -1522,6 +1530,13 @@ fn App() -> impl IntoView {
                 format!("/api/backtest?ticker={t}&strategy=cramer_inverse{window}&initial_amount={amt}{bench_suffix}")
             } else if a == "short_squeeze" {
                 format!("/api/backtest?ticker={t}&strategy=short_squeeze{window}&initial_amount={amt}{bench_suffix}")
+            } else if a == "savings" {
+                // Rate is entered as a percent; the engine wants a fraction.
+                format!(
+                    "/api/backtest?ticker={t}&strategy=savings_plan&rate={}&compound={}&contribution={}\
+                     {window}&initial_amount={amt}{bench_suffix}",
+                    savings_rate.get() / 100.0, savings_compound.get(), savings_contribution.get()
+                )
             } else {
                 let strategy = action_to_strategy(&a);
                 let f  = if a == "golden" { 50 } else { fast.get() };
@@ -1835,7 +1850,7 @@ fn App() -> impl IntoView {
                             <ConcernPanel step="02" title="Trade action"
                                 question="When do I get in & out?".to_string()>
                                 <div style="display:flex;flex-direction:column;gap:var(--space-3);">
-                                    <BdSelect on_change=Box::new(move |v| {
+                                    <BdSelect value=a.clone() on_change=Box::new(move |v| {
                                         action.set(v); single_result.set(None);
                                     })>
                                         <optgroup label="— ACTIONS (apply to your selection) —">
@@ -1850,6 +1865,7 @@ fn App() -> impl IntoView {
                                             <option value="riskparity">"Risk Parity"</option>
                                             <option value="sectorrot">"Momentum Sector Rotation"</option>
                                             <option value="cycle">"Economic-Cycle Rotation"</option>
+                                            <option value="savings">"Savings Plan"</option>
                                             <option value="cramer">"Inverse Cramer  ·  meme"</option>
                                             <option value="congress">"Congressional Copy-Trade  ·  meme"</option>
                                             <option value="short_squeeze">"Short Squeeze  ·  meme"</option>
@@ -1997,6 +2013,33 @@ fn App() -> impl IntoView {
                                             <BdInput label="Sectors to hold (top N)".to_string() mono=true
                                                 value=top_n.get().to_string()
                                                 on_input=Box::new(move |v| top_n.set(v.parse().unwrap_or(3))) />
+                                        </div>
+                                    }.into_view(),
+                                    "savings" => view! {
+                                        <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
+                                            <div style="width:150px;">
+                                                <BdInput label="Annual rate (%)".to_string() mono=true
+                                                    value=savings_rate.get().to_string()
+                                                    on_input=Box::new(move |v| savings_rate.set(v.parse().unwrap_or(7.0))) />
+                                            </div>
+                                            <div style="width:180px;">
+                                                <BdInput label="Yearly contribution ($)".to_string() mono=true
+                                                    value=format!("{:.0}", savings_contribution.get())
+                                                    on_input=Box::new(move |v| savings_contribution.set(v.parse().unwrap_or(0.0))) />
+                                            </div>
+                                            <div style="align-self:center;">
+                                                {move || view! {
+                                                    <BdSwitch
+                                                        checked=savings_compound.get()
+                                                        label=if savings_compound.get() {
+                                                            "Compound".to_string()
+                                                        } else {
+                                                            "Linear (off start sum)".to_string()
+                                                        }
+                                                        on_change=Box::new(move |v| savings_compound.set(v))
+                                                    />
+                                                }}
+                                            </div>
                                         </div>
                                     }.into_view(),
                                     "congress" => view! {

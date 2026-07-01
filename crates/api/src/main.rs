@@ -19,6 +19,7 @@ use bagholder_core::{
     run_multi_asset_backtest,
     run_portfolio_backtest, Bar, BacktestResult, BandConfig, Candidate, CongressTrade,
     run_portfolio_backtest_taxed, is_fund_type, project_forward,
+    run_savings_plan, savings_plan_gain_returns, SavingsPlan,
     CorporateAction, FillCosts, FundTax, Fundamental, PeHistory, RebalanceConfig, Strategy, TaxConfig, TaxSystem, SECTOR_ETFS,
 };
 use std::collections::HashMap;
@@ -86,6 +87,13 @@ struct BacktestQuery {
     tax_sellall: Option<bool>,
     /// Attach a Monte Carlo forward-projection fan to the result (default off).
     project: Option<bool>,
+    // Savings-plan benchmark params (strategy=savings_plan).
+    /// Annual gain rate as a fraction, e.g. 0.07 for 7% (default 0.07).
+    rate: Option<f64>,
+    /// Compound the gains (default true); false = linear off the starting sum.
+    compound: Option<bool>,
+    /// Yearly cash added to the plan, in dollars (default 0).
+    contribution: Option<f64>,
 }
 
 /// Map the `tax=` query value to a `TaxSystem`; anything unrecognized = None.
@@ -311,7 +319,31 @@ async fn backtest(
     } else {
         None
     };
-    let mut result = if pe_min {
+    // Savings-plan benchmark: a no-trade deterministic account (#91). It borrows
+    // only the run's date axis — the ticker's bars supply the calendar, prices are
+    // ignored. Special-cased here (like the event strategies) but kept in the main
+    // flow so it still gets the tax, pretax, benchmark and projection wiring below.
+    let is_savings = q.strategy == "savings_plan";
+    let sp_plan = SavingsPlan {
+        annual_rate: q.rate.unwrap_or(0.07),
+        annual_contribution: q.contribution.unwrap_or(0.0),
+        compound: q.compound.unwrap_or(true),
+    };
+    let mut result = if is_savings {
+        let run_bars = if q.from_year.is_some() || q.to_year.is_some() {
+            trim_range(bars, q.from_year, q.to_year)
+        } else {
+            trim_years(bars, q.years)
+        };
+        let dates: Vec<chrono::NaiveDate> = run_bars.iter().map(|b| b.date).collect();
+        let mut r = run_savings_plan(&dates, amount, &sp_plan, &tax_cfg);
+        // Pretax baseline (same plan, no tax) so the UI can pair after-tax vs pre-tax.
+        if system != TaxSystem::None {
+            let pre = run_savings_plan(&dates, amount, &sp_plan, &TaxConfig::default());
+            r.pretax = Some(Box::new(pre));
+        }
+        r
+    } else if pe_min {
         let series = pe_series(&bars, &eps);
         let window = q.pe_window.unwrap_or(63);
         let minima = local_minima(&series, window);
@@ -396,7 +428,13 @@ async fn backtest(
     };
     if let Some(h) = horizon.filter(|h| *h > 0) {
         if result.curve.len() >= 2 {
-            let rets: Vec<f64> = result.curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect();
+            // Savings plan: bootstrap the gain-only series so the fan reflects
+            // growth, not the contribution jumps that live in the curve deltas.
+            let rets: Vec<f64> = if is_savings {
+                savings_plan_gain_returns(result.curve.len(), amount, &sp_plan)
+            } else {
+                result.curve.windows(2).map(|w| w[1].equity / w[0].equity - 1.0).collect()
+            };
             let last = result.curve.last().map(|p| p.equity).unwrap_or(1.0);
             let mut proj = project_forward(&rets, h);
             for band in [&mut proj.p10, &mut proj.p50, &mut proj.p90] {
