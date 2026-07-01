@@ -232,9 +232,11 @@ pub fn BdStat(
 pub fn BdCallout(
     #[prop(default = "neutral".to_string())] tone: String,
     #[prop(optional)]                        title: Option<String>,
+    /// Optional leading icon (registry name), tinted with the tone's bar color.
+    #[prop(optional)]                        icon: Option<String>,
     children: Children,
 ) -> impl IntoView {
-    let (bg, _bar, fg) = match tone.as_str() {
+    let (bg, bar, fg) = match tone.as_str() {
         "accent" => ("var(--accent-soft)", "var(--accent)", "var(--rust-700)"),
         "gain"   => ("var(--gain-200)",    "var(--gain)",   "var(--gain-600)"),
         "loss"   => ("var(--loss-200)",    "var(--loss)",   "var(--loss-600)"),
@@ -249,6 +251,11 @@ pub fn BdCallout(
     );
     view! {
         <div role="note" style=style>
+            {icon.map(|name| view! {
+                <span style=format!("color:{bar};flex:none;margin-top:1px;")>
+                    <Icon name=name size=20 />
+                </span>
+            })}
             <div style="display:flex;flex-direction:column;gap:2px;min-width:0;">
                 {title.map(|t| view! {
                     <span style=format!(
@@ -626,6 +633,12 @@ pub fn Icon(name: String, #[prop(default = 16)] size: usize) -> impl IntoView {
         "chevron-down" => "<path d=\"m6 9 6 6 6-6\"/>",
         "chevron-up" => "<path d=\"m18 15-6-6-6 6\"/>",
         "minus-circle" => "<circle cx=\"12\" cy=\"12\" r=\"10\"/><path d=\"M8 12h8\"/>",
+        "rewind" => "<polygon points=\"11 19 2 12 11 5 11 19\"/><polygon points=\"22 19 13 12 22 5 22 19\"/>",
+        "sliders-horizontal" => "<line x1=\"21\" x2=\"14\" y1=\"4\" y2=\"4\"/><line x1=\"10\" x2=\"3\" y1=\"4\" y2=\"4\"/><line x1=\"21\" x2=\"12\" y1=\"12\" y2=\"12\"/><line x1=\"8\" x2=\"3\" y1=\"12\" y2=\"12\"/><line x1=\"21\" x2=\"16\" y1=\"20\" y2=\"20\"/><line x1=\"12\" x2=\"3\" y1=\"20\" y2=\"20\"/><line x1=\"14\" x2=\"14\" y1=\"2\" y2=\"6\"/><line x1=\"8\" x2=\"8\" y1=\"10\" y2=\"14\"/><line x1=\"16\" x2=\"16\" y1=\"18\" y2=\"22\"/>",
+        "bar-chart-3" => "<path d=\"M3 3v18h18\"/><path d=\"M18 17V9\"/><path d=\"M13 17V5\"/><path d=\"M8 17v-3\"/>",
+        "alert-triangle" => "<path d=\"m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z\"/><path d=\"M12 9v4\"/><path d=\"M12 17h.01\"/>",
+        "bookmark" => "<path d=\"m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z\"/>",
+        "check" => "<path d=\"M20 6 9 17l-5-5\"/>",
         _ => "",
     };
     let s = size.to_string();
@@ -635,6 +648,31 @@ pub fn Icon(name: String, #[prop(default = 16)] size: usize) -> impl IntoView {
              stroke-linejoin="round" inner_html=inner
              style="display:block;flex:none;" />
     }
+}
+
+// ─── Overline ──────────────────────────────────────────────────────────────────
+
+/// The small monospace kicker that sits above a section or card title. Three
+/// tones so it reads on paper (`accent`, default), muted, or over dark teal
+/// panels (`on-ink`). Ports `Overline` from `design_system/components/core`.
+#[component]
+pub fn Overline(
+    #[prop(into, optional)] tone: Option<String>,
+    #[prop(into, optional)] style: Option<String>,
+    children: Children,
+) -> impl IntoView {
+    let color = match tone.as_deref() {
+        Some("muted") => "var(--text-muted)",
+        Some("on-ink") => "var(--text-on-ink-muted)",
+        _ => "var(--accent)",
+    };
+    let style = format!(
+        "font-family:var(--font-mono);font-weight:700;font-size:var(--text-micro);\
+         letter-spacing:var(--tracking-overline);text-transform:uppercase;color:{};{}",
+        color,
+        style.unwrap_or_default(),
+    );
+    view! { <div style=style>{children()}</div> }
 }
 
 // ─── RateChips ─────────────────────────────────────────────────────────────────
