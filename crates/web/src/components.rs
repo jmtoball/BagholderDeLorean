@@ -650,6 +650,62 @@ pub fn Icon(name: String, #[prop(default = 16)] size: usize) -> impl IntoView {
     }
 }
 
+// ─── SiteFooter ────────────────────────────────────────────────────────────────
+
+/// One nav link in a [`BdSiteFooter`].
+#[derive(Clone, Debug)]
+pub struct FooterLink {
+    pub label: String,
+    pub href: String,
+}
+
+/// A full-bleed image footer: the supplied artwork covers the band, a bottom
+/// scrim keeps text legible, a mono uppercase tagline sits up top and the nav
+/// links anchor the bottom-right. Ports `SiteFooter` from
+/// `design_system/components/core`.
+#[component]
+pub fn BdSiteFooter(
+    #[prop(into)] image: String,
+    #[prop(into)] tagline: String,
+    links: Vec<FooterLink>,
+    #[prop(default = 320)] height: usize,
+) -> impl IntoView {
+    let shell = format!(
+        "position:relative;overflow:hidden;min-height:{height}px;\
+         border-top:var(--border-bold) solid var(--ink-900);\
+         background-color:var(--ink-900);background-image:url({image});\
+         background-size:cover;background-position:center bottom;"
+    );
+    let inner = format!(
+        "position:relative;box-sizing:border-box;max-width:1320px;min-height:{height}px;\
+         margin:0 auto;padding:28px 56px;display:flex;flex-direction:column;\
+         justify-content:space-between;"
+    );
+    view! {
+        <footer style=shell>
+            // legibility scrim along the bottom edge
+            <div aria-hidden="true" style="position:absolute;inset:0;pointer-events:none;\
+                 background:linear-gradient(to bottom,rgba(15,18,26,0) 55%,rgba(15,18,26,0.55) 100%);" />
+            <div style=inner>
+                <span style="font-family:var(--font-mono);font-size:12px;letter-spacing:0.16em;\
+                             text-transform:uppercase;color:rgba(255,255,255,0.55);\
+                             text-shadow:0 1px 6px rgba(0,0,0,0.6);">
+                    {tagline}
+                </span>
+                <div style="display:flex;align-items:flex-end;justify-content:flex-end;\
+                            gap:24px;flex-wrap:wrap;">
+                    <nav style="display:flex;align-items:center;gap:28px;font-weight:600;font-size:14px;">
+                        {links.into_iter().map(|l| view! {
+                            <a href=l.href style="color:rgba(255,255,255,0.82);text-decoration:none;\
+                                text-shadow:0 1px 6px rgba(0,0,0,0.6);">{l.label}</a>
+                        }).collect_view()}
+                    </nav>
+                </div>
+            </div>
+        </footer>
+    }
+}
+
 // ─── Overline ──────────────────────────────────────────────────────────────────
 
 /// The small monospace kicker that sits above a section or card title. Three

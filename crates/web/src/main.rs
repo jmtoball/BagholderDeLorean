@@ -17,7 +17,7 @@ use chrono::{Datelike, NaiveDate};
 use leptos::*;
 use serde::de::DeserializeOwned;
 
-use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSelect, BdStat, BdSwitch, BdTabs, Chip, Icon, Overline, RateChips, TabItem};
+use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSelect, BdSiteFooter, BdStat, BdSwitch, BdTabs, Chip, FooterLink, Icon, Overline, RateChips, TabItem};
 
 // ─── Chart geometry ───────────────────────────────────────────────────────────
 const W: f64   = 720.0;
@@ -1918,20 +1918,15 @@ fn App() -> impl IntoView {
             </div>
         </section>
 
-        <footer style="background:var(--teal-800);border-top:var(--border-bold) solid var(--ink-900);">
-            <div style="max-width:860px;margin:0 auto;padding:18px var(--gutter);\
-                        display:flex;align-items:center;justify-content:space-between;\
-                        gap:var(--space-4);flex-wrap:wrap;">
-                <span style="font-family:var(--font-mono);font-size:var(--text-xs);\
-                              letter-spacing:0.08em;color:var(--text-on-ink-muted);">
-                    "© 1985–2025 BagholderDeLorean"
-                </span>
-                <span style="font-family:var(--font-mono);font-size:var(--text-micro);\
-                              color:var(--text-on-ink-muted);">
-                    "Past performance is a vibe, not a promise."
-                </span>
-            </div>
-        </footer>
+        <BdSiteFooter
+            image="/assets/footer.png".to_string()
+            tagline="Where we\u{2019}re going, we don\u{2019}t need returns".to_string()
+            links=vec![
+                FooterLink { label: "About".to_string(),        href: "#about".to_string() },
+                FooterLink { label: "Imprint".to_string(),      href: "#imprint".to_string() },
+                FooterLink { label: "Legal Notice".to_string(), href: "#legal".to_string() },
+            ]
+        />
     }
 }
 
