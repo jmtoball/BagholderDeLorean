@@ -456,6 +456,12 @@ async fn backtest(
         _ if q.project.unwrap_or(false) => Some(result.curve.len()),
         _ => None,
     };
+    // `will_project` (decided from `bars` before the run, to defer sell-all) and
+    // `horizon` (decided from the result curve here) are two derivations of the
+    // same predicate. They agree today but are coupled by convention, not
+    // construction — trip a debug assert if they ever diverge, since the silent
+    // failure mode drops the terminal liquidation tax entirely (PR #118 review).
+    debug_assert_eq!(will_project, horizon.is_some(), "will_project vs horizon diverged");
     if let Some(h) = horizon.filter(|h| *h > 0) {
         if result.curve.len() >= 2 {
             // Savings plan: bootstrap the gain-only series so the fan reflects
