@@ -641,6 +641,7 @@ pub fn Icon(name: String, #[prop(default = 16)] size: usize) -> impl IntoView {
         "check" => "<path d=\"M20 6 9 17l-5-5\"/>",
         "settings-2" => "<path d=\"M20 7h-9\"/><path d=\"M14 17H5\"/><circle cx=\"17\" cy=\"17\" r=\"3\"/><circle cx=\"7\" cy=\"7\" r=\"3\"/>",
         "layout-grid" => "<rect width=\"7\" height=\"7\" x=\"3\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"7\" x=\"14\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"7\" x=\"14\" y=\"14\" rx=\"1\"/><rect width=\"7\" height=\"7\" x=\"3\" y=\"14\" rx=\"1\"/>",
+        "trending-up" => "<polyline points=\"22 7 13.5 15.5 8.5 10.5 2 17\"/><polyline points=\"16 7 22 7 22 13\"/>",
         _ => "",
     };
     let s = size.to_string();
@@ -777,6 +778,59 @@ pub fn Overline(
         style.unwrap_or_default(),
     );
     view! { <div style=style>{children()}</div> }
+}
+
+// ─── YearStepper ───────────────────────────────────────────────────────────────
+
+/// A numeric −5/−1 · field · +1/+5 stepper for a year, clamped to `[min, max]`
+/// with buttons disabling at the bounds. `tone="accent"` rings it in accent (used
+/// for the To-year while projecting). Ports the DS `Stepper` (step 1, bigStep 5).
+/// `value` is static — wrap the call in a reactive closure so a signal drives it.
+#[component]
+pub fn BdYearStepper(
+    value: u32,
+    min: u32,
+    max: u32,
+    #[prop(default = "ink".to_string())] tone: String,
+    #[prop(into)] on_change: Callback<u32>,
+) -> impl IntoView {
+    let ring = if tone == "accent" { "var(--accent)" } else { "var(--ink-800)" };
+    let clamp = move |v: i64| v.max(min as i64).min(max as i64) as u32;
+    let btn = move |delta: i64, label: &'static str| {
+        let target = clamp(value as i64 + delta);
+        let dis = target == value;
+        let style = format!(
+            "min-width:38px;height:var(--control-md);padding:0 8px;font-family:var(--font-mono);\
+             font-weight:700;font-size:12.5px;color:{};background:var(--surface-card);\
+             border:2px solid {ring};border-radius:var(--radius-sm);cursor:{};opacity:{};",
+            if dis { "var(--text-faint)" } else { "var(--text-strong)" },
+            if dis { "not-allowed" } else { "pointer" },
+            if dis { "0.45" } else { "1" },
+        );
+        view! {
+            <button type="button" disabled=dis aria-label=format!("{} by {}", if delta > 0 { "Increase" } else { "Decrease" }, delta.abs())
+                on:click=move |_| on_change.call(target) style=style>{label}</button>
+        }
+    };
+    let input_style = format!(
+        "width:78px;height:var(--control-md);text-align:center;font-family:var(--font-mono);\
+         font-weight:700;font-size:15px;color:var(--text-strong);background:var(--surface-sunken);\
+         border:2px solid {ring};border-radius:var(--radius-sm);box-sizing:border-box;"
+    );
+    view! {
+        <div style="display:flex;align-items:stretch;gap:6px;">
+            {btn(-5, "\u{2212}5")}
+            {btn(-1, "\u{2212}1")}
+            <input type="number" prop:value=value.to_string()
+                min=min.to_string() max=max.to_string()
+                on:change=move |ev| {
+                    if let Ok(v) = event_target_value(&ev).parse::<i64>() { on_change.call(clamp(v)); }
+                }
+                style=input_style />
+            {btn(1, "+1")}
+            {btn(5, "+5")}
+        </div>
+    }
 }
 
 // ─── RateChips ─────────────────────────────────────────────────────────────────
