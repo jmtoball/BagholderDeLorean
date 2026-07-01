@@ -1015,17 +1015,22 @@ fn App() -> impl IntoView {
             let vh = window().inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(800.0);
             let center = vh / 2.0;
             let doc = document();
-            let mut best = 0usize;
+            // Prefer the section whose vertical span straddles the viewport centre
+            // (robust when a section is taller than the viewport, e.g. a filled
+            // Config/Simulation); fall back to the nearest midpoint otherwise.
+            let mut straddling = None;
+            let mut nearest = 0usize;
             let mut best_d = f64::MAX;
             for (i, id) in SECTION_IDS.iter().enumerate() {
                 if let Some(el) = doc.get_element_by_id(id) {
                     let r = el.get_bounding_client_rect();
-                    let mid = r.top() + r.height() / 2.0;
-                    let d = (mid - center).abs();
-                    if d < best_d { best_d = d; best = i; }
+                    let (top, bottom) = (r.top(), r.top() + r.height());
+                    if top <= center && center < bottom { straddling = Some(i); }
+                    let d = (top + r.height() / 2.0 - center).abs();
+                    if d < best_d { best_d = d; nearest = i; }
                 }
             }
-            active_section.set(best);
+            active_section.set(straddling.unwrap_or(nearest));
         };
         // Keep the listeners for the app's lifetime (CSR never unmounts).
         std::mem::forget(window_event_listener(ev::scroll, move |_| update()));
