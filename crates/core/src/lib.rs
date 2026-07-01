@@ -2011,10 +2011,15 @@ fn savings_plan_path(n_bars: usize, initial: f64, plan: &SavingsPlan) -> (Vec<f6
     if n_bars > 0 {
         values.push(value);
     }
+    // The gain return is exactly constant — compound: `daily_factor - 1`; linear:
+    // `r/252` off the starting sum. Emitting the exact constant (not `gain/pre`,
+    // whose FP noise gives a tiny-but-nonzero variance) keeps the plan riskless:
+    // zero return variance → Sharpe 0, as befits a deterministic line.
+    let ret = if plan.compound { daily_factor - 1.0 } else { plan.annual_rate / 252.0 };
     for _ in 1..n_bars {
         let pre = value;
         let gain = if plan.compound { pre * (daily_factor - 1.0) } else { linear_gain };
-        rets.push(if pre != 0.0 { gain / pre } else { 0.0 });
+        rets.push(ret);
         value = pre + gain + contrib;
         values.push(value);
     }
