@@ -2038,18 +2038,11 @@ fn App() -> impl IntoView {
                                                     value=format!("{:.0}", savings_contribution.get())
                                                     on_input=Box::new(move |v| savings_contribution.set(v.parse().unwrap_or(0.0))) />
                                             </div>
-                                            <div style="align-self:center;">
-                                                {move || view! {
-                                                    <BdSwitch
-                                                        checked=savings_compound.get()
-                                                        label=if savings_compound.get() {
-                                                            "Compound".to_string()
-                                                        } else {
-                                                            "Linear (off start sum)".to_string()
-                                                        }
-                                                        on_change=Box::new(move |v| savings_compound.set(v))
-                                                    />
-                                                }}
+                                            <div>
+                                                <span style=MINI_LABEL>"Compound"</span>
+                                                <div style="display:flex;align-items:center;min-height:var(--control-md);">
+                                                    {move || { let on = savings_compound.get(); view! { <BdSwitch checked=on on_change=Box::new(move |v| savings_compound.set(v)) label=(if on { "On" } else { "Off" }).to_string() /> } }}
+                                                </div>
                                             </div>
                                         </div>
                                     }.into_view(),
