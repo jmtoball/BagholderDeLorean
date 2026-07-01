@@ -1504,6 +1504,21 @@ fn settle_year(
     (tax, new_carry)
 }
 
+/// One-time terminal capital-gains tax on liquidating a position worth
+/// `terminal_value` that was bought for `basis`. Models the whole gain as a
+/// single wholesale long-term realization — no carried Vorabpauschale or loss
+/// state (the savings-plan / forward-projection simplification). Reuses
+/// `settle_year`, so `TaxSystem::None` yields 0 and Germany's Sparerpauschbetrag
+/// still shelters the gain. Plain f64 in/out so `core` stays pure and WASM-clean.
+///
+/// Used to levy the "sell everything at the end" tax at a forward projection's
+/// terminal point (per fan band) instead of folding it into the last backtest
+/// bar, so the tax fires at the right end of the run.
+pub fn terminal_sell_all_tax(basis: f64, terminal_value: f64, tax: &TaxConfig) -> f64 {
+    let gain = (terminal_value - basis).max(0.0);
+    settle_year(tax, 0.0, gain, 0.0, 0.0, 0.0).0
+}
+
 /// Event-driven single-asset backtest using the portfolio state model.
 /// Processes bars in chronological order; at each bar, marks to market then
 /// rebalances to `signal * equity / price` shares at the bar's close (no lookahead).
@@ -2070,8 +2085,9 @@ pub fn run_savings_plan(
     let mut total_tax = 0.0;
     let mut tax_per_year: Vec<YearTax> = Vec::new();
     if tax.sell_all && tax.system != TaxSystem::None && n > 0 {
-        let gain = (values.last().copied().unwrap_or(initial) - basis).max(0.0);
-        let t = settle_year(tax, 0.0, gain, 0.0, 0.0, 0.0).0;
+        let terminal = values.last().copied().unwrap_or(initial);
+        let gain = (terminal - basis).max(0.0);
+        let t = terminal_sell_all_tax(basis, terminal, tax);
         if t != 0.0 {
             total_tax = t;
             if let Some(last) = curve.last_mut() {
@@ -2514,6 +2530,28 @@ mod tests {
         assert_eq!(r_on.trades.iter().filter(|t| t.action == "sell").count(), 0);
         assert_eq!(r_on.trades.len(), 1);
         assert_eq!(r_off.trades.len(), 1);
+    }
+
+    #[test]
+    fn terminal_sell_all_taxes_projection_end_not_backtest() {
+        // The helper levies the "sell everything at the end" tax on a *projected*
+        // band's terminal value — its own gain over basis, as a single wholesale
+        // long-term realization. Basis 10_000; three fan bands terminate low/mid/high.
+        let mut tax = TaxConfig::preset(TaxSystem::UsFederal);
+        tax.taxable_income = 96_000.0; // long-term rate 15%, below the NIIT cliff
+        let basis = 10_000.0;
+        // A band that ends below basis has no gain → no tax.
+        assert_eq!(terminal_sell_all_tax(basis, 8_000.0, &tax), 0.0);
+        // Gains are taxed at the 15% long-term rate — each band on its own gain.
+        assert!((terminal_sell_all_tax(basis, 15_000.0, &tax) - 5_000.0 * 0.15).abs() < 1e-9);
+        assert!((terminal_sell_all_tax(basis, 30_000.0, &tax) - 20_000.0 * 0.15).abs() < 1e-9);
+        // `None` never taxes (a no-projection or tax-free run is unaffected).
+        assert_eq!(terminal_sell_all_tax(basis, 30_000.0, &TaxConfig::default()), 0.0);
+        // Germany applies the flat rate net of the Sparerpauschbetrag allowance.
+        let de = TaxConfig::preset(TaxSystem::Germany); // allowance 1_000, rate 26.375%
+        let gain = 20_000.0;
+        let expected = (gain - de.annual_allowance) * de.de_flat_rate();
+        assert!((terminal_sell_all_tax(basis, basis + gain, &de) - expected).abs() < 1e-9);
     }
 
     #[test]
