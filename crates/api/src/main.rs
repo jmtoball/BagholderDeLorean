@@ -538,7 +538,7 @@ async fn preset_backtest(
             &bars_by_ticker,
             move |history, _| pairs_alloc(history, &ta2, &tb2, win, entry_z),
             &cfg, 10_000.0, &FillCosts::ZERO, 0.0,
-        );
+        ).with_amount(10_000.0);
         return Ok(Json(result));
     }
 
@@ -574,7 +574,7 @@ async fn preset_backtest(
             10_000.0,
             &FillCosts::ZERO,
             0.0,
-        );
+        ).with_amount(10_000.0);
         return Ok(Json(result));
     }
 
@@ -618,7 +618,7 @@ async fn preset_backtest(
         &FillCosts::ZERO,
         0.0,
     );
-    Ok(Json(result))
+    Ok(Json(result.with_amount(10_000.0)))
 }
 
 fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
