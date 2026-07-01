@@ -17,7 +17,7 @@ use chrono::{Datelike, NaiveDate};
 use leptos::*;
 use serde::de::DeserializeOwned;
 
-use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSectionNav, BdSelect, BdSiteFooter, BdStat, BdSwitch, BdTabs, BdYearStepper, Chip, FooterLink, Icon, Overline, RateChips, TabItem};
+use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSectionNav, BdSelect, BdSiteFooter, BdStat, BdSwitch, BdTabs, BdTickerInput, BdYearStepper, Chip, FooterLink, Icon, Overline, RateChips, TabItem};
 
 // ─── Chart geometry ───────────────────────────────────────────────────────────
 const W: f64   = 720.0;
@@ -1450,11 +1450,26 @@ fn App() -> impl IntoView {
         });
     };
 
-    // Fetch universe once on mount for datalist autocomplete.
+    // Fetch the ticker universe (symbol + company name) once on mount for the
+    // BdTickerInput autocomplete. The memo maps it into `(symbol, name)` pairs so
+    // every field reuses one cached list (recomputed only when the fetch resolves).
+    #[derive(Clone, serde::Serialize, serde::Deserialize)]
+    struct UniverseEntry {
+        symbol: String,
+        name: String,
+    }
     let universe = create_resource(
         || (),
-        |_| async { get_json::<Vec<String>>("/api/universe").await.unwrap_or_default() },
+        |_| async { get_json::<Vec<UniverseEntry>>("/api/universe").await.unwrap_or_default() },
     );
+    let ticker_universe = create_memo(move |_| {
+        universe
+            .get()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| (e.symbol, e.name))
+            .collect::<Vec<(String, String)>>()
+    });
 
     let busy          = create_rw_signal(false);
     let single_result = create_rw_signal::<Option<Result<BacktestResult, String>>>(None);
@@ -1775,12 +1790,6 @@ fn App() -> impl IntoView {
                 }}
             </header>
 
-            // Datalist for ticker autocomplete — populated from /api/universe.
-            {move || universe.get().map(|tickers| view! {
-                <datalist id="tickers">
-                    {tickers.into_iter().map(|t| view! { <option value=t /> }).collect_view()}
-                </datalist>
-            })}
 
             // Two-concern panel (left) + benchmark/tax add-ons (reserved right column)
             <div class="bd-config-grid" style="display:grid;gap:18px;align-items:start;">
@@ -1828,10 +1837,10 @@ fn App() -> impl IntoView {
                                                 }.into_view()
                                             } else {
                                                 view! {
-                                                    <BdInput mono=true placeholder="AAPL".to_string()
+                                                    <BdTickerInput placeholder="AAPL".to_string()
                                                         value=ticker.get_untracked()
-                                                        list="tickers".to_string()
-                                                        on_input=Box::new(move |v| ticker.set(v.to_uppercase())) />
+                                                        suggestions=ticker_universe
+                                                        on_change=Callback::new(move |v: String| ticker.set(v.to_uppercase())) />
                                                 }.into_view()
                                             }}
                                         </div>
@@ -1992,14 +2001,16 @@ fn App() -> impl IntoView {
                                     "pairs" => view! {
                                         <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
                                             <div style="width:130px;">
-                                                <BdInput label="Ticker A".to_string() mono=true
-                                                    value=ticker_a.get()
-                                                    on_input=Box::new(move |v| ticker_a.set(v.to_uppercase())) />
+                                                <BdTickerInput label="Ticker A".to_string()
+                                                    value=ticker_a.get_untracked()
+                                                    suggestions=ticker_universe
+                                                    on_change=Callback::new(move |v: String| ticker_a.set(v.to_uppercase())) />
                                             </div>
                                             <div style="width:130px;">
-                                                <BdInput label="Ticker B".to_string() mono=true
-                                                    value=ticker_b.get()
-                                                    on_input=Box::new(move |v| ticker_b.set(v.to_uppercase())) />
+                                                <BdTickerInput label="Ticker B".to_string()
+                                                    value=ticker_b.get_untracked()
+                                                    suggestions=ticker_universe
+                                                    on_change=Callback::new(move |v: String| ticker_b.set(v.to_uppercase())) />
                                             </div>
                                             <div style="width:150px;">
                                                 <BdInput label="Z-score entry".to_string() mono=true
@@ -2124,10 +2135,11 @@ fn App() -> impl IntoView {
                                     </button>
                                 </div>
                                 <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
-                                    <BdInput mono=true label="vs. ticker".to_string()
+                                    <BdTickerInput label="vs. ticker".to_string()
                                         placeholder="SPY".to_string()
-                                        value=benchmark_ticker.get()
-                                        on_input=Box::new(move |v| benchmark_ticker.set(v.trim().to_uppercase())) />
+                                        value=benchmark_ticker.get_untracked()
+                                        suggestions=ticker_universe
+                                        on_change=Callback::new(move |v: String| benchmark_ticker.set(v.trim().to_uppercase())) />
                                     <BdSelect label="vs. strategy".to_string()
                                         on_change=Box::new(move |v| benchmark_strategy.set(v))>
                                         <option value="buy_and_hold">"Buy and hold"</option>

@@ -354,6 +354,150 @@ pub fn BdInput(
     }
 }
 
+// ─── BdTickerInput ─────────────────────────────────────────────────────────────
+
+/// Symbol `startsWith` first, then name-contains, capped at 7 — the prototype's
+/// `matchTickers`. Empty query returns the first 7 (the list is symbol-sorted).
+fn match_tickers(all: &[(String, String)], q: &str) -> Vec<(String, String)> {
+    let s = q.trim().to_uppercase();
+    if s.is_empty() {
+        return all.iter().take(7).cloned().collect();
+    }
+    let starts = all.iter().filter(|(sym, _)| sym.starts_with(&s));
+    let name_hit = all
+        .iter()
+        .filter(|(sym, n)| !sym.starts_with(&s) && n.to_uppercase().contains(&s));
+    starts.chain(name_hit).take(7).cloned().collect()
+}
+
+/// Autocomplete ticker field — a DS input with a floating symbol + company-name
+/// menu, keyboard nav (Arrow/Enter/Escape) and a search-icon suffix. Ports
+/// `TickerInput` from `design_system/ui_kits/webapp/Shared.jsx`. `on_change` fires
+/// on every edit and on selection; `suggestions` is the `(symbol, name)` universe.
+/// ponytail: `match_tickers` re-scans the full universe per keystroke — fine for
+/// the ~13k SEC list; precompute an uppercased index if it ever drags.
+#[component]
+pub fn BdTickerInput(
+    #[prop(into)]             value: String,
+    #[prop(into)]             suggestions: Signal<Vec<(String, String)>>,
+    #[prop(into)]             on_change: Callback<String>,
+    #[prop(optional)]         label: Option<String>,
+    #[prop(optional)]         placeholder: Option<String>,
+    #[prop(default = "100%".to_string())] width: String,
+) -> impl IntoView {
+    let (focused, set_focused) = create_signal(false);
+    let open = create_rw_signal(false);
+    let active = create_rw_signal(0usize);
+    let query = create_rw_signal(value.clone());
+    let input_ref = create_node_ref::<html::Input>();
+
+    let matches = create_memo(move |_| suggestions.with(|all| match_tickers(all, &query.get())));
+
+    let choose = move |sym: String| {
+        query.set(sym.clone());
+        if let Some(el) = input_ref.get_untracked() {
+            el.set_value(&sym);
+        }
+        on_change.call(sym);
+        open.set(false);
+    };
+
+    let wrap_style = move || format!(
+        "display:flex;align-items:center;gap:var(--space-2);\
+         height:var(--control-md);padding:0 var(--space-3);background:var(--surface-card);\
+         border:var(--border-line) solid var(--ink-800);border-radius:var(--radius-md);\
+         box-shadow:{};transition:box-shadow var(--dur-fast) var(--ease-out);",
+        if focused.get() { "0 0 0 3px var(--ring),var(--shadow-inset)" } else { "var(--shadow-inset)" }
+    );
+
+    let menu_style = "position:absolute;top:100%;left:0;margin:6px 0 0;z-index:40;\
+        min-width:max(100%,240px);list-style:none;padding:4px;\
+        background:var(--surface-card);border:var(--border-line) solid var(--ink-800);\
+        border-radius:var(--radius-md);box-shadow:var(--shadow-float);";
+
+    let on_key = move |ev: leptos::ev::KeyboardEvent| match ev.key().as_str() {
+        "ArrowDown" => {
+            ev.prevent_default();
+            open.set(true);
+            let last = matches.get().len().saturating_sub(1);
+            active.update(|a| *a = (*a + 1).min(last));
+        }
+        "ArrowUp" => {
+            ev.prevent_default();
+            active.update(|a| *a = a.saturating_sub(1));
+        }
+        "Enter" => {
+            if open.get() {
+                if let Some((sym, _)) = matches.get().get(active.get()).cloned() {
+                    ev.prevent_default();
+                    choose(sym);
+                }
+            }
+        }
+        "Escape" => open.set(false),
+        _ => {}
+    };
+
+    view! {
+        <div style=format!("position:relative;width:{width};")>
+            <label style="display:flex;flex-direction:column;gap:var(--space-2);">
+                {label.map(|l| view! {
+                    <span style="font-size:var(--text-sm);font-weight:var(--weight-semibold);color:var(--text-strong);">{l}</span>
+                })}
+                <span style=wrap_style>
+                    <input
+                        node_ref=input_ref
+                        prop:value=value
+                        placeholder=placeholder.unwrap_or_else(|| "Search ticker\u{2026}".to_string())
+                        autocomplete="off"
+                        style="flex:1;min-width:0;border:none;outline:none;background:transparent;\
+                               font-family:var(--font-mono);font-size:var(--text-base);color:var(--text-body);"
+                        on:focus=move |_| { set_focused.set(true); open.set(true); }
+                        on:blur=move |_| { set_focused.set(false); open.set(false); }
+                        on:keydown=on_key
+                        on:input=move |e| {
+                            let v = event_target_value(&e).to_uppercase();
+                            query.set(v.clone());
+                            on_change.call(v);
+                            open.set(true);
+                            active.set(0);
+                        }
+                    />
+                    <span style="flex:none;display:flex;color:var(--text-muted);">
+                        <Icon name="search".to_string() size=15 />
+                    </span>
+                </span>
+            </label>
+            {move || (open.get() && !matches.get().is_empty()).then(|| view! {
+                <ul style=menu_style>
+                    {move || matches.get().into_iter().enumerate().map(|(i, (sym, name))| {
+                        let sym_c = sym.clone();
+                        let row_style = move || format!(
+                            "display:flex;align-items:baseline;gap:10px;width:100%;text-align:left;\
+                             cursor:pointer;border:none;border-radius:var(--radius-sm);padding:8px 10px;\
+                             background:{};",
+                            if active.get() == i { "var(--surface-sunken)" } else { "transparent" }
+                        );
+                        view! {
+                            <li>
+                                <button type="button" style=row_style
+                                    // mousedown (not click) so the choice lands before the input blurs.
+                                    on:mousedown=move |e| { e.prevent_default(); choose(sym_c.clone()); }
+                                    on:mouseenter=move |_| active.set(i)>
+                                    <span style="font-family:var(--font-mono);font-weight:700;font-size:13px;color:var(--text-strong);min-width:52px;">{sym}</span>
+                                    {(!name.is_empty()).then(|| view! {
+                                        <span style="font-size:12.5px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{name}</span>
+                                    })}
+                                </button>
+                            </li>
+                        }
+                    }).collect_view()}
+                </ul>
+            })}
+        </div>
+    }
+}
+
 // ─── BdSelect ────────────────────────────────────────────────────────────────
 
 #[component]
@@ -665,6 +809,7 @@ pub fn Icon(name: String, #[prop(default = 16)] size: usize) -> impl IntoView {
         "settings-2" => "<path d=\"M20 7h-9\"/><path d=\"M14 17H5\"/><circle cx=\"17\" cy=\"17\" r=\"3\"/><circle cx=\"7\" cy=\"7\" r=\"3\"/>",
         "layout-grid" => "<rect width=\"7\" height=\"7\" x=\"3\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"7\" x=\"14\" y=\"3\" rx=\"1\"/><rect width=\"7\" height=\"7\" x=\"14\" y=\"14\" rx=\"1\"/><rect width=\"7\" height=\"7\" x=\"3\" y=\"14\" rx=\"1\"/>",
         "trending-up" => "<polyline points=\"22 7 13.5 15.5 8.5 10.5 2 17\"/><polyline points=\"16 7 22 7 22 13\"/>",
+        "search" => "<circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"m21 21-4.3-4.3\"/>",
         _ => "",
     };
     let s = size.to_string();

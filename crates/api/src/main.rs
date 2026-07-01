@@ -518,13 +518,26 @@ async fn screen(
     Ok(Json(candidates))
 }
 
-/// Returns all US ticker symbols from SEC's directory as a JSON array of strings.
-async fn universe(State(db): State<Db>) -> Result<Json<Vec<String>>, (StatusCode, String)> {
+/// One autocomplete entry: a ticker symbol and its SEC company name (`name` is
+/// empty when SEC has none). Feeds the `BdTickerInput` symbol + name rows (#107).
+#[derive(serde::Serialize)]
+struct UniverseEntry {
+    symbol: String,
+    name: String,
+}
+
+/// All US tickers from SEC's directory as `[{ symbol, name }]` for the ticker
+/// autocomplete.
+async fn universe(State(db): State<Db>) -> Result<Json<Vec<UniverseEntry>>, (StatusCode, String)> {
     let tickers = tokio::task::spawn_blocking(move || db.lock().unwrap().all_tickers())
         .await
         .map_err(internal)?
         .map_err(internal)?;
-    Ok(Json(tickers))
+    let entries = tickers
+        .into_iter()
+        .map(|(symbol, name)| UniverseEntry { symbol, name })
+        .collect();
+    Ok(Json(entries))
 }
 
 /// Multi-asset preset backtests: `GET /api/preset?kind=risk_parity&tickers=SPY,QQQ,GLD`

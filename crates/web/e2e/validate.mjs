@@ -246,6 +246,79 @@ await step('Gallery: two tabs, backtested cards, bookmark persistence, open-load
   await page.locator('input:not([type="checkbox"])').first().fill('AAPL');
 });
 
+// ─── 1b. Ticker autocomplete — BdTickerInput on every ticker field (#107) ─────
+
+await step('Ticker autocomplete: floating symbol+name menu, keyboard nav, all fields (#107)', async () => {
+  // The native <datalist> is gone — every field is a BdTickerInput now.
+  const datalists = await page.evaluate(() => document.querySelectorAll('datalist').length);
+  if (datalists === 0) ok('native <datalist> removed');
+  else fail(`expected no <datalist>, found ${datalists}`);
+
+  await actionSelect().selectOption('buyhold');
+  await page.waitForTimeout(200);
+  const mainInp = () => page.locator('#config input:not([type="checkbox"])').first();
+  const menuRows = () => page.locator('#config ul li button');
+
+  // Main ticker: typing opens a floating menu of symbol + company-name rows.
+  await mainInp().click();
+  await mainInp().fill('');
+  await page.keyboard.type('AAP', { delay: 30 });
+  await page.waitForTimeout(200);
+  const rows = (await menuRows().allInnerTexts()).join(' ');
+  if (menuRows().length !== 0 && /AAPL/.test(rows) && /APPLE/i.test(rows))
+    ok('main ticker menu shows symbol + company name rows');
+  else fail(`main ticker menu missing symbol/name rows: ${rows}`);
+  await shot('01b-ticker-autocomplete');
+
+  // Keyboard: ArrowDown highlights the active row, Enter selects it.
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
+  const picked = await mainInp().inputValue();
+  if (/^AAP/.test(picked)) ok(`keyboard nav selected a suggestion (${picked})`);
+  else fail(`keyboard selection did not fill the input: ${picked}`);
+
+  // Pairs Ticker A / Ticker B both open menus.
+  await actionSelect().selectOption('pairs');
+  await page.waitForTimeout(250);
+  for (const label of ['Ticker A', 'Ticker B']) {
+    const inp = page.locator('#config label').filter({ hasText: label }).locator('input');
+    await inp.click(); await inp.fill(''); await page.keyboard.type('KO', { delay: 20 });
+    await page.waitForTimeout(150);
+    if (await menuRows().count() > 0) ok(`${label} opens its autocomplete menu`);
+    else fail(`${label} did not open a menu`);
+    await page.keyboard.press('Escape');
+  }
+
+  // Benchmark "vs. ticker" field.
+  await actionSelect().selectOption('buyhold');
+  await page.waitForTimeout(200);
+  // Precise: the benchmark toggle button (not a substring "ADD" that also matches
+  // "Add tax simulation" and would expand the tax card instead).
+  const addBench = page.locator('#config button').filter({ hasText: 'Add a benchmark' });
+  if (await addBench.count()) { await addBench.click(); await page.waitForTimeout(250); }
+  const benchInp = page.locator('#config label').filter({ hasText: 'vs. ticker' }).locator('input');
+  if (await benchInp.count()) {
+    await benchInp.click(); await benchInp.fill(''); await page.keyboard.type('SP', { delay: 20 });
+    await page.waitForTimeout(150);
+    if (await menuRows().count() > 0) ok('Benchmark field opens its autocomplete menu');
+    else fail('Benchmark field did not open a menu');
+    await page.keyboard.press('Escape');
+    // Blur to dismiss the floating menu, then remove the benchmark so later steps
+    // run clean (the open menu would otherwise overlay the Remove control).
+    await page.locator('#config').click({ position: { x: 6, y: 6 } });
+    await page.waitForTimeout(150);
+    const rm = page.locator('button[aria-label="Remove benchmark"]');
+    if (await rm.count()) await rm.click({ timeout: 4000 }).catch(() => {});
+  } else { fail('Benchmark "vs. ticker" field not found'); }
+
+  // Restore a clean AAPL for the following steps.
+  await actionSelect().selectOption('buyhold');
+  await page.waitForTimeout(150);
+  await mainInp().fill('AAPL');
+  await page.keyboard.press('Escape');
+});
+
 // ─── 2. Buy & Hold — default AAPL 10y ────────────────────────────────────────
 
 await step('Buy & Hold (AAPL, 10y)', async () => {
