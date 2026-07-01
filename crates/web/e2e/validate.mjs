@@ -139,6 +139,24 @@ await step('Config and Simulation are distinct full-screen sections (#93)', asyn
   await page.locator('#config').scrollIntoViewIfNeeded();
 });
 
+// ─── 1d. Footer — full-bleed SiteFooter (#97) ────────────────────────────────
+
+await step('Footer renders the redesigned full-bleed SiteFooter (#97)', async () => {
+  await page.locator('footer').scrollIntoViewIfNeeded();
+  const bg = await page.locator('footer').evaluate((el) => getComputedStyle(el).backgroundImage);
+  if (!bg.includes('footer.png')) fail('footer.png cover not set');
+  else ok('footer renders the footer.png cover');
+  const t = await page.locator('footer').innerText();
+  if (!/where we.re going, we don.t need returns/i.test(t)) fail('footer mono tagline missing');
+  else ok('footer mono tagline present');
+  for (const l of ['About', 'Imprint', 'Legal Notice']) {
+    if (!t.includes(l)) fail(`footer nav link "${l}" missing`);
+    else ok(`footer nav has "${l}"`);
+  }
+  await shot('1d-footer');
+  await page.evaluate(() => window.scrollTo(0, 0));
+});
+
 // ─── 2. Buy & Hold — default AAPL 10y ────────────────────────────────────────
 
 await step('Buy & Hold (AAPL, 10y)', async () => {
