@@ -99,6 +99,24 @@ await step('App loads', async () => {
   await shot('01-load');
 });
 
+// ─── 1a. Hero — full-bleed cover + CTA → Gallery (#95) ───────────────────────
+
+await step('Hero renders full-bleed cover and the CTA jumps to Gallery (#95)', async () => {
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(200);
+  if (await page.locator('section img[src="/assets/hero-bg.png"]').count() < 1) fail('hero-bg cover image missing');
+  else ok('hero renders the full-bleed hero-bg cover');
+  if (await page.locator('img[src="/assets/logo.png"]').count() < 1) fail('hero logo missing');
+  else ok('hero logo present');
+  await shot('1a-hero');
+
+  await page.getByRole('button', { name: 'Scroll to enter the gallery' }).click();
+  await page.waitForTimeout(800);
+  const top = await page.evaluate(() => document.getElementById('gallery').getBoundingClientRect().top);
+  if (Math.abs(top) > 4) fail(`CTA did not land on the Gallery section (rect.top=${Math.round(top)})`);
+  else ok('CTA scrolls to the Gallery section');
+});
+
 // ─── 1b. Stacked screens — Config & Simulation are separate sections ─────────
 
 await step('Config and Simulation are distinct full-screen sections (#93)', async () => {

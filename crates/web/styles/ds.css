@@ -174,13 +174,6 @@ html { scroll-behavior: smooth; }
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.06'/%3E%3C/svg%3E");
 }
 
-/* Hero columns — stack on narrow viewports (illustration first). */
-.bd-hero-grid { grid-template-columns: 0.92fr 1.08fr; }
-@media (max-width: 880px) {
-  .bd-hero-grid { grid-template-columns: 1fr; }
-  .bd-hero-art  { order: -1; }
-}
-
 /* Config screen: concern panel + reserved add-on column. Fixed two-up on wide
    viewports (the prototype layout); collapses to one column on narrow screens
    so the section never overflows its overflow:hidden bounds. */
@@ -190,8 +183,6 @@ html { scroll-behavior: smooth; }
 }
 
 @keyframes bd-rise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
-@keyframes bd-pop  { from { opacity: 0; transform: rotate(-3deg) scale(0.94); } to { opacity: 1; transform: rotate(-3deg) scale(1); } }
-@keyframes bd-chip { from { opacity: 0; transform: translateY(10px) rotate(3deg); } to { opacity: 1; transform: translateY(0) rotate(3deg); } }
 @keyframes bd-bob  { 0%,100% { transform: translateY(0); } 50% { transform: translateY(5px); } }
 @keyframes bd-spin { to { transform: rotate(360deg); } }
 @keyframes bd-fade { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }

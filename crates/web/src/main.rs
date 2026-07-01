@@ -1133,91 +1133,73 @@ fn App() -> impl IntoView {
     };
 
     view! {
-        // ── Hero ──────────────────────────────────────────────────────────────
+        // ── Hero (full-bleed cover + teal scrim) ──────────────────────────────
         <section class="bd-grain" style="position:relative;overflow:hidden;min-height:100vh;\
-                       background:var(--teal-700);display:flex;flex-direction:column;">
-            // Moon glow
-            <div style="position:absolute;top:-90px;right:-60px;width:340px;height:340px;\
-                        border-radius:50%;background:radial-gradient(circle at 40% 38%,\
-                        var(--rust-300),var(--rust-600) 70%,var(--rust-700));\
-                        opacity:0.22;filter:blur(2px);pointer-events:none;" />
+                       background:var(--teal-700);display:flex;flex-direction:column;\
+                       border-bottom:var(--border-bold) solid var(--ink-900);">
+            // Full-bleed cover art
+            <img src="/assets/hero-bg.png"
+                 alt="An old bagholder leaning on a DeLorean in an empty teal landscape"
+                 style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;\
+                        object-position:right bottom;z-index:0;pointer-events:none;" />
+            // Left→right teal gradient scrim keeps the copy legible over the art
+            <div style="position:absolute;inset:0;z-index:1;pointer-events:none;\
+                        background:linear-gradient(100deg,var(--teal-700) 4%,\
+                        rgba(38,74,84,0.78) 30%,rgba(38,74,84,0.30) 52%,rgba(38,74,84,0) 70%);" />
             // Brand mark
-            <header style="position:relative;z-index:2;display:flex;align-items:center;\
-                           padding:var(--space-5) var(--gutter) var(--space-1);max-width:1280px;width:100%;margin:0 auto;">
+            <header style="position:relative;z-index:3;display:flex;align-items:center;\
+                           padding:24px 48px 4px;max-width:1320px;width:100%;margin:0 auto;box-sizing:border-box;">
                 <img src="/assets/logo.png" alt="BagholderDeLorean"
                      style="height:72px;width:auto;display:block;" />
             </header>
-            // Hero grid
-            <div class="bd-hero-grid" style="position:relative;z-index:1;flex:1;display:grid;\
-                        gap:var(--space-7);align-items:center;max-width:1280px;width:100%;margin:0 auto;\
-                        padding:var(--space-3) var(--gutter) var(--space-6);">
-                <div style="animation:bd-rise 0.55s var(--ease-out) both;">
+            // Headline + copy over the art
+            <div style="position:relative;z-index:2;flex:1;display:flex;align-items:center;\
+                        max-width:1320px;width:100%;margin:0 auto;padding:12px 48px 48px;box-sizing:border-box;">
+                <div style="max-width:560px;animation:bd-rise 0.55s var(--ease-out) both;">
                     <span style="display:inline-flex;align-items:center;gap:var(--space-2);\
                                  font-family:var(--font-mono);font-weight:700;font-size:var(--text-micro);\
                                  letter-spacing:0.16em;text-transform:uppercase;color:var(--ink-800);\
                                  background:var(--accent-soft);border:var(--border-line) solid var(--ink-900);\
                                  border-radius:var(--radius-full);padding:6px 13px;\
-                                 box-shadow:var(--shadow-hard-sm);margin-bottom:var(--space-5);">
-                        "Backtesting · time machine"
+                                 box-shadow:var(--shadow-hard-sm);margin-bottom:24px;">
+                        "Backtesting Time Machine"
                     </span>
                     <h1 style="font-family:var(--font-display);font-weight:800;\
-                                font-size:clamp(var(--text-display-md),6vw,60px);line-height:0.98;\
-                                letter-spacing:-0.03em;margin:0 0 18px;color:var(--paper-50);">
-                        "Backtest before you " <span style="color:var(--accent-soft);">"baghold."</span>
+                                font-size:clamp(42px,5vw,64px);line-height:0.98;\
+                                letter-spacing:-0.03em;margin:0 0 18px;color:var(--paper-50);\
+                                text-shadow:0 2px 18px rgba(20,38,44,0.45);">
+                        "Backtest before" <br /> "you " <span style="color:var(--accent-soft);">"baghold."</span>
                     </h1>
-                    <p style="font-size:var(--text-lg);line-height:1.55;color:var(--text-on-ink-muted);\
-                              max-width:440px;margin:0 0 var(--space-1);">
+                    <p style="font-size:18px;line-height:1.55;color:var(--text-on-ink-muted);\
+                              max-width:440px;margin:0 0 4px;">
                         "Send a trading strategy back in time and find out whether you'd have \
                          gotten rich — or ended up holding the bag. Honest numbers, zero promises."
                     </p>
-                    <p style="font-family:var(--font-mono);font-size:var(--text-xs);\
-                              color:var(--text-on-ink-muted);margin:var(--space-5) 0 0;">
+                    <p style="font-family:var(--font-mono);font-size:12px;\
+                              color:var(--text-on-ink-muted);margin:24px 0 0;">
                         "Past performance is a vibe, not a promise."
                     </p>
                 </div>
-                <div class="bd-hero-art" style="position:relative;display:flex;justify-content:center;">
-                    <div style="position:relative;animation:bd-pop 0.6s var(--ease-lurch) both;">
-                        <img src="/assets/bagholder-hero.png"
-                             alt="An old bagholder leaning on a DeLorean under a rust-colored moon"
-                             style="display:block;width:100%;max-width:440px;\
-                                    border:4px solid var(--ink-900);border-radius:20px;\
-                                    box-shadow:10px 12px 0 0 var(--ink-900);" />
-                        <div style="position:absolute;left:-28px;bottom:34px;\
-                                    animation:bd-chip 0.7s var(--ease-out) 0.25s both;\
-                                    background:var(--paper-50);border:var(--border-bold) solid var(--ink-900);\
-                                    border-radius:var(--radius-lg);box-shadow:5px 5px 0 0 var(--ink-900);\
-                                    padding:14px 18px;">
-                            <div style="font-family:var(--font-mono);font-weight:700;font-size:10.5px;\
-                                        letter-spacing:0.12em;text-transform:uppercase;\
-                                        color:var(--text-muted);">"Golden Cross · 2019→24"</div>
-                            <div style="display:flex;align-items:baseline;gap:10px;margin-top:var(--space-1);">
-                                <span style="font-family:var(--font-mono);font-weight:700;\
-                                             font-size:var(--text-display-sm);color:var(--ink-900);">"+34.2%"</span>
-                                <span style="font-family:var(--font-body);font-weight:700;font-size:var(--text-micro);\
-                                             color:var(--paper-50);background:var(--gain);\
-                                             border:var(--border-line) solid var(--ink-900);border-radius:var(--radius-full);\
-                                             padding:3px 9px;">"vs +11% SPY"</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
             </div>
-            // Scroll-down link (native anchor → smooth scroll, no JS) → Gallery section
-            <a href="#gallery" aria-label="Scroll to enter the gallery"
-               style="position:relative;z-index:2;align-self:center;margin-bottom:18px;\
-                      display:inline-flex;flex-direction:column;align-items:center;gap:2px;\
-                      color:var(--text-on-ink-muted);text-decoration:none;\
-                      font-family:var(--font-mono);font-size:var(--text-micro);letter-spacing:0.1em;\
-                      text-transform:uppercase;">
+            // Centred CTA with a bobbing chevron → Gallery section
+            <button type="button" on:click=move |_| scroll_to("gallery")
+                aria-label="Scroll to enter the gallery"
+                style="position:relative;z-index:3;align-self:center;margin-bottom:26px;\
+                       display:inline-flex;flex-direction:column;align-items:center;gap:6px;\
+                       background:transparent;border:none;cursor:pointer;color:var(--paper-50);\
+                       font-family:var(--font-mono);font-size:12px;font-weight:700;\
+                       letter-spacing:0.14em;text-transform:uppercase;">
                 "Scroll to enter the gallery"
-                <span style="font-size:20px;line-height:1;animation:bd-bob 1.6s var(--ease-out) infinite;">"⌄"</span>
-            </a>
+                <span style="display:inline-flex;animation:bd-bob 1.6s var(--ease-out) infinite;">
+                    <Icon name="chevron-down".to_string() size=24 />
+                </span>
+            </button>
         </section>
 
         // ── Gallery (placeholder — the wall of curated runs lands in #94) ─────
         <section id="gallery" style="min-height:100vh;display:flex;flex-direction:column;\
                        justify-content:center;padding:84px 56px;box-sizing:border-box;\
-                       background:var(--surface-page);border-top:var(--border-bold) solid var(--ink-900);">
+                       background:var(--surface-page);">
             <div style="max-width:1320px;margin:0 auto;width:100%;">
                 <Overline>"Gallery of broken dreams"</Overline>
                 <h2 style="font-family:var(--font-display);font-weight:800;font-size:36px;\
