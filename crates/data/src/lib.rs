@@ -304,19 +304,24 @@ fn sec_get(url: &str) -> Result<String> {
 
 /// SEC's full ticker -> CIK directory (~1 MB). Tickers come back upper-cased and
 /// suffix-free, e.g. "AAPL", "BRK-B".
-pub fn download_cik_map() -> Result<Vec<(String, i64)>> {
+/// `(ticker, cik, company_name)` for every name in SEC's directory. The `title`
+/// (SEC's legal company name, e.g. "APPLE INC.") is kept for the ticker
+/// autocomplete's symbol + name rows.
+pub fn download_cik_map() -> Result<Vec<(String, i64, String)>> {
     parse_cik_map(&sec_get("https://www.sec.gov/files/company_tickers.json")?)
 }
 
-fn parse_cik_map(body: &str) -> Result<Vec<(String, i64)>> {
+fn parse_cik_map(body: &str) -> Result<Vec<(String, i64, String)>> {
     #[derive(Deserialize)]
     struct Entry {
         cik_str: i64,
         ticker: String,
+        #[serde(default)]
+        title: String,
     }
     // The file is a JSON object keyed by row index: {"0": {...}, "1": {...}}.
     let rows: HashMap<String, Entry> = serde_json::from_str(body).context("parsing CIK map")?;
-    Ok(rows.into_values().map(|e| (e.ticker, e.cik_str)).collect())
+    Ok(rows.into_values().map(|e| (e.ticker, e.cik_str, e.title)).collect())
 }
 
 /// Sector + industry for `symbol` from Yahoo Finance's search endpoint. Either
@@ -573,7 +578,10 @@ mod tests {
                        "1":{"cik_str":789019,"ticker":"MSFT","title":"Microsoft"}}"#;
         let mut map = parse_cik_map(json).unwrap();
         map.sort();
-        assert_eq!(map, vec![("AAPL".into(), 320193), ("MSFT".into(), 789019)]);
+        assert_eq!(map, vec![
+            ("AAPL".into(), 320193, "Apple Inc.".into()),
+            ("MSFT".into(), 789019, "Microsoft".into()),
+        ]);
     }
 
     #[test]

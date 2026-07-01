@@ -28,8 +28,12 @@ CREATE TABLE IF NOT EXISTS fundamentals (
 );
 CREATE TABLE IF NOT EXISTS cik_map (
   ticker TEXT   PRIMARY KEY,
-  cik    BIGINT NOT NULL
+  cik    BIGINT NOT NULL,
+  name   TEXT
 );
+-- Migration for DBs created before the name column (#107): add it if missing so
+-- an existing cik_map keeps working; the next populate backfills the names.
+ALTER TABLE cik_map ADD COLUMN IF NOT EXISTS name TEXT;
 CREATE TABLE IF NOT EXISTS macro_series (
   series_id TEXT NOT NULL,
   date      DATE NOT NULL,
@@ -284,20 +288,23 @@ impl Store {
         }
     }
 
-    /// All US ticker symbols from SEC's directory, lazily populating `cik_map`
-    /// on first use (same pattern as `cik()`).
-    pub fn all_tickers(&self) -> Result<Vec<String>> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT count(*) FROM cik_map", [], |r| r.get(0))?;
-        if count == 0 {
+    /// Every US ticker with its SEC company name — `(symbol, name)`, name empty
+    /// when SEC has none — for the ticker autocomplete. Lazily populates `cik_map`,
+    /// and re-populates when an older DB has rows but no names yet (the #107
+    /// migration added the column; this backfills it on first use).
+    pub fn all_tickers(&self) -> Result<Vec<(String, String)>> {
+        let with_names: i64 = self.conn.query_row(
+            "SELECT count(*) FROM cik_map WHERE name IS NOT NULL", [], |r| r.get(0))?;
+        if with_names == 0 {
             self.write_cik_map(&download_cik_map()?)?;
         }
-        let mut stmt = self.conn.prepare("SELECT ticker FROM cik_map ORDER BY ticker")?;
-        let tickers = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
+        let mut stmt = self
+            .conn
+            .prepare("SELECT ticker, COALESCE(name, '') FROM cik_map ORDER BY ticker")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(tickers)
+        Ok(rows)
     }
 
     /// `(ticker, cik)` for every name in `cik_map`, lazily populating it on first
@@ -395,14 +402,14 @@ impl Store {
         Ok(rows)
     }
 
-    fn write_cik_map(&self, map: &[(String, i64)]) -> Result<()> {
+    fn write_cik_map(&self, map: &[(String, i64, String)]) -> Result<()> {
         self.conn.execute_batch("BEGIN")?;
         {
             let mut stmt = self
                 .conn
-                .prepare("INSERT OR REPLACE INTO cik_map VALUES (?, ?)")?;
-            for (ticker, cik) in map {
-                stmt.execute(params![ticker, cik])?;
+                .prepare("INSERT OR REPLACE INTO cik_map (ticker, cik, name) VALUES (?, ?, ?)")?;
+            for (ticker, cik, name) in map {
+                stmt.execute(params![ticker, cik, name])?;
             }
         }
         self.conn.execute_batch("COMMIT")?;
@@ -690,7 +697,7 @@ mod tests {
     fn refresh_universe_keeps_large_caps_with_sector() {
         let s = Store::in_memory().unwrap();
         // Seed cik_map directly so all_tickers() doesn't download the full directory.
-        s.write_cik_map(&[("AAPL".into(), 320193), ("MSFT".into(), 789019)]).unwrap();
+        s.write_cik_map(&[("AAPL".into(), 320193, "Apple Inc.".into()), ("MSFT".into(), 789019, "Microsoft Corp".into())]).unwrap();
         let kept = s.refresh_universe("2026-06-30".parse().unwrap()).unwrap();
         assert!(kept >= 1, "expected ≥1 large-cap kept, got {kept}");
         let u = s.screen_universe().unwrap();
@@ -759,14 +766,18 @@ mod tests {
     }
 
     #[test]
-    fn all_tickers_lists_warmed_cik_map() {
+    fn all_tickers_lists_warmed_cik_map_with_names() {
         let s = Store::in_memory().unwrap();
         // warm cik_map directly so all_tickers() reads it instead of downloading
-        s.write_cik_map(&[("AAPL".into(), 320193), ("BRK-B".into(), 1067983)])
-            .unwrap();
+        s.write_cik_map(&[
+            ("AAPL".into(), 320193, "Apple Inc.".into()),
+            ("BRK-B".into(), 1067983, "Berkshire Hathaway Inc".into()),
+        ])
+        .unwrap();
         let got = s.all_tickers().unwrap();
-        assert!(got.contains(&"AAPL".to_string()));
-        assert!(got.contains(&"BRK-B".to_string()));
+        // Each entry carries its SEC company name (the #107 autocomplete needs it).
+        assert!(got.contains(&("AAPL".to_string(), "Apple Inc.".to_string())));
+        assert!(got.contains(&("BRK-B".to_string(), "Berkshire Hathaway Inc".to_string())));
     }
 
     #[test]
