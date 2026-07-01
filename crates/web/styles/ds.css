@@ -183,11 +183,24 @@ html { scroll-behavior: smooth; }
   .bd-config-grid { grid-template-columns: 1fr; }
 }
 
+/* Gallery card wall — three-up on wide, collapsing so cards never crush. */
+.bd-gallery-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 980px) { .bd-gallery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .bd-gallery-grid { grid-template-columns: 1fr; } }
+
 @keyframes bd-rise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
 @keyframes bd-bob  { 0%,100% { transform: translateY(0); } 50% { transform: translateY(5px); } }
 @keyframes bd-spin { to { transform: rotate(360deg); } }
 @keyframes bd-fade { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 .bd-fade { animation: bd-fade 0.35s var(--ease-out) both; }
+
+/* Gallery card + its floating action buttons — hover lift (CSS so no per-card signal). */
+.bd-gallery-card { box-shadow: var(--shadow-hard); transform: none;
+  transition: box-shadow var(--dur) var(--ease-out), transform var(--dur) var(--ease-out); }
+.bd-gallery-card:hover { box-shadow: var(--shadow-hard-lg); transform: translate(-2px, -2px); }
+.bd-float-btn { box-shadow: var(--shadow-hard-sm); transform: none;
+  transition: box-shadow var(--dur) var(--ease-out), transform var(--dur) var(--ease-out), background var(--dur) var(--ease-out); }
+.bd-float-btn:hover { box-shadow: var(--shadow-hard); transform: translate(-1px, -1px); }
 
 body {
   margin: 0;

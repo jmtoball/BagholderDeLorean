@@ -82,6 +82,179 @@ fn is_meme(id: &str) -> bool { matches!(id, "cramer" | "congress" | "short_squee
 fn is_screen_run(sel_method: &str, action: &str) -> bool {
     sel_method == "screen" && !is_preset(action)
 }
+
+// ─── Gallery model ──────────────────────────────────────────────────────────────
+/// "Now" for the year model — the backtest window ends here (mirrors the
+/// prototype's `TODAY_YEAR`). Convert relative timeframes against it.
+const THIS_YEAR: u32 = 2026;
+const COLLECTION_KEY: &str = "bdl_webapp_collection_v1";
+
+/// A saved/curated backtest configuration. Mirrors the prototype's `cfg` shape
+/// (minus `screen` — screen-based gallery cards are a follow-up). Serialized into
+/// `localStorage` for "My collection".
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct GalleryCfg {
+    sel_method: String,
+    ticker: String,
+    action: String,
+    from_year: u32,
+    to_year: u32,
+    benchmark: String,
+    #[serde(default)]
+    realistic: bool,
+    /// Second leg for the pairs preset; empty otherwise.
+    #[serde(default)]
+    ticker_b: String,
+}
+
+impl GalleryCfg {
+    /// Stable signature for dedupe — mirrors the prototype's `cfgSig`.
+    fn sig(&self) -> String {
+        // Every field that distinguishes a run must be in the key, or two configs
+        // that differ only there collide (same id → bookmarking one dedupes the
+        // other). ticker_b is a live dimension for pairs. (Add `screen` here once
+        // screen cards land in #102.)
+        format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}",
+            self.sel_method, self.ticker, self.action, self.from_year,
+            self.to_year, self.benchmark, self.realistic, self.ticker_b
+        )
+    }
+    /// The `/api` call whose curve + total return drive this card. Mirrors the
+    /// URL-building in `run()` so a card matches what a real run would produce.
+    fn backtest_url(&self) -> String {
+        let years = THIS_YEAR.min(self.to_year).saturating_sub(self.from_year).max(1);
+        match self.action.as_str() {
+            "riskparity" => "/api/preset?kind=risk_parity".to_string(),
+            "sectorrot"  => "/api/preset?kind=sector_rotation".to_string(),
+            "cycle"      => "/api/preset?kind=econ_cycle".to_string(),
+            "pairs" => {
+                let b = if self.ticker_b.is_empty() { "PEP" } else { &self.ticker_b };
+                format!("/api/preset?kind=pairs&ticker_a={}&ticker_b={}&entry_z=2", self.ticker, b)
+            }
+            _ => {
+                let strategy = action_to_strategy(&self.action);
+                let (f, sl) = if self.action == "golden" { (50, 200) } else { (20, 50) };
+                format!(
+                    "/api/backtest?ticker={}&strategy={}&fast={}&slow={}&years={}\
+                     &rsi_threshold=20&initial_amount=10000",
+                    self.ticker, strategy, f, sl, years
+                )
+            }
+        }
+    }
+}
+
+/// A gallery card: a titled, kickered config with a Meme flag. `custom` items
+/// are user-saved (live in the collection); the rest are the curated wall.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct GalleryItem {
+    id: String,
+    title: String,
+    kicker: String,
+    #[serde(default)]
+    meme: bool,
+    #[serde(default)]
+    custom: bool,
+    cfg: GalleryCfg,
+}
+
+fn gcfg(sel_method: &str, ticker: &str, action: &str, from_year: u32, to_year: u32,
+        benchmark: &str, realistic: bool, ticker_b: &str) -> GalleryCfg {
+    GalleryCfg {
+        sel_method: sel_method.into(), ticker: ticker.into(), action: action.into(),
+        from_year, to_year, benchmark: benchmark.into(), realistic, ticker_b: ticker_b.into(),
+    }
+}
+
+/// The curated "gallery of broken dreams". Only cfgs the engine runs today as a
+/// single backtest — the meme presets that still error (cramer, congress) and
+/// the screen cards (lowpe/momentum, which return candidate lists, not a curve)
+/// are a follow-up (see PR notes).
+fn preset_cards() -> Vec<GalleryItem> {
+    let mk = |id: &str, title: &str, kicker: &str, meme: bool, cfg: GalleryCfg| GalleryItem {
+        id: id.into(), title: title.into(), kicker: kicker.into(), meme, custom: false, cfg,
+    };
+    vec![
+        mk("p_golden", "The cross that pundits won\u{2019}t shut up about", "Golden Cross", false,
+           gcfg("ticker", "AAPL", "golden", 2019, 2024, "spy", false, "")),
+        mk("p_nvda", "You held NVIDIA and touched grass", "Buy & Hold", false,
+           gcfg("ticker", "NVDA", "buyhold", 2016, 2026, "spy", false, "")),
+        mk("p_gme", "Buying the dip into a falling knife", "BTFD", true,
+           gcfg("ticker", "GME", "btfd", 2021, 2026, "spy", false, "")),
+        mk("p_riskparity", "Boring on purpose, and proud of it", "Risk Parity", false,
+           gcfg("ticker", "PARITY", "riskparity", 2010, 2026, "6040", false, "")),
+        mk("p_pairs", "Coke vs. Pepsi, forever at war", "Pairs / Stat-Arb", false,
+           gcfg("ticker", "KO", "pairs", 2012, 2026, "spy", false, "PEP")),
+    ]
+}
+
+/// Benchmark id (spy/qqq/…) → a plain Yahoo ticker for the config's benchmark input.
+fn bench_ticker(id: &str) -> &'static str {
+    // 6040 = the prototype's synthetic "60/40 portfolio"; AOR (iShares Core Growth
+    // Allocation) is the closest real, tradeable 60/40 fund the engine can load.
+    match id { "qqq" => "QQQ", "iwm" => "IWM", "dia" => "DIA", "gld" => "GLD",
+               "btc" => "BTC-USD", "6040" => "AOR", _ => "SPY" }
+}
+/// Reverse of [`bench_ticker`] for saving the current config.
+fn bench_id(ticker: &str) -> &'static str {
+    match ticker { "QQQ" => "qqq", "IWM" => "iwm", "DIA" => "dia", "GLD" => "gld",
+                   "BTC-USD" => "btc", "AOR" => "6040", _ => "spy" }
+}
+/// A from/to-year span mapped to the nearest timeframe preset (until #67 lands
+/// the year pickers, the config still speaks in `1y/…/Max`).
+fn span_to_timeframe(from_year: u32, to_year: u32) -> &'static str {
+    let span = THIS_YEAR.min(to_year).saturating_sub(from_year);
+    if span >= 15 { "Max" } else if span >= 10 { "10y" } else if span >= 5 { "5y" }
+    else if span >= 3 { "3y" } else { "1y" }
+}
+/// "What am I trading" label for a saved item's default title.
+fn subject_label(cfg: &GalleryCfg) -> String {
+    if is_preset(&cfg.action) { action_label(&cfg.action).to_string() } else { cfg.ticker.clone() }
+}
+
+fn local_storage() -> Option<web_sys::Storage> {
+    window().local_storage().ok().flatten()
+}
+fn load_collection() -> Vec<GalleryItem> {
+    local_storage()
+        .and_then(|s| s.get_item(COLLECTION_KEY).ok().flatten())
+        .and_then(|json| serde_json::from_str::<Vec<GalleryItem>>(&json).ok())
+        .unwrap_or_default()
+}
+fn save_collection(items: &[GalleryItem]) {
+    if let Some(s) = local_storage() {
+        if let Ok(json) = serde_json::to_string(items) {
+            let _ = s.set_item(COLLECTION_KEY, &json);
+        }
+    }
+}
+/// Build a custom collection item from a cfg (bookmarking a preset or saving the
+/// current config). Id is derived from the signature so it dedupes deterministically.
+fn make_collection_item(cfg: GalleryCfg, title: Option<String>, meme: bool) -> GalleryItem {
+    let kicker = action_label(&cfg.action).to_string();
+    let title = title.unwrap_or_else(|| format!("{} \u{00b7} {}", subject_label(&cfg), kicker));
+    let id = format!("c_{}", cfg.sig().replace(['|', ' ', '/'], "_"));
+    GalleryItem { id, title, kicker, meme, custom: true, cfg }
+}
+
+/// Kick off the lazy per-card backtest for any item not already fetched, caching
+/// the result (in-session) keyed by cfg signature. Runs once per unique cfg.
+fn ensure_cards(
+    results: RwSignal<HashMap<String, Option<Result<BacktestResult, String>>>>,
+    items: &[GalleryItem],
+) {
+    for it in items {
+        let sig = it.cfg.sig();
+        if results.with_untracked(|m| m.contains_key(&sig)) { continue; }
+        results.update(|m| { m.insert(sig.clone(), None); });
+        let url = it.cfg.backtest_url();
+        spawn_local(async move {
+            let r = get_json::<BacktestResult>(&url).await;
+            results.update(|m| { m.insert(sig, Some(r)); });
+        });
+    }
+}
 fn timeframe_years(tf: &str) -> u32 {
     match tf { "1y" => 1, "3y" => 3, "5y" => 5, "10y" => 10, _ => 0 }
 }
@@ -267,6 +440,12 @@ fn tax_query(system: &str, income: f64, church: bool, allowance: f64, estimate: 
 fn fmt_pct(x: f64) -> String {
     let v = x * 100.0;
     format!("{}{:.1}%", if v >= 0.0 { "+" } else { "\u{2212}" }, v.abs())
+}
+/// Compact total-return for a gallery card's headline plate. Percentages read
+/// fine up to ~10× (+900%); beyond that a real multi-bagger (NVDA-style) blows
+/// past the plate width, so switch to a "×N" multiple.
+fn fmt_card_return(x: f64) -> String {
+    if x >= 9.0 { format!("\u{00d7}{:.0}", 1.0 + x) } else { fmt_pct(x) }
 }
 /// Ratios (Sharpe/Sortino/Recovery) — show "∞" for the no-downside / no-drawdown
 /// case instead of "inf" or a misleading "0.00". (An infinite sortino is sent as
@@ -901,6 +1080,141 @@ fn pe_chart(ticker: &str, h: &PeHistory, entry: Option<NaiveDate>) -> View {
     }.into_view()
 }
 
+// ─── Gallery cards ──────────────────────────────────────────────────────────────
+
+/// Full-bleed mini equity curve for a gallery card (green for a win, red for a
+/// loss, with a soft fill). `uniq` keeps the gradient id document-unique.
+fn mini_equity_chart(data: &[f64], win: bool, uniq: &str) -> View {
+    if data.len() < 2 {
+        return view! { <div style="width:100%;height:100%;background:var(--surface-sunken);" /> }.into_view();
+    }
+    let (w, h) = (320.0_f64, 200.0_f64);
+    let min = data.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let range = if (max - min).abs() < 1e-9 { 1.0 } else { max - min };
+    let n = data.len();
+    let sx = |i: usize| (i as f64 / (n - 1) as f64) * w;
+    let sy = |v: f64| 14.0 + (1.0 - (v - min) / range) * (h - 28.0);
+    let mut line = String::new();
+    for (i, v) in data.iter().enumerate() {
+        line.push_str(&format!("{}{:.1} {:.1} ", if i == 0 { "M" } else { "L" }, sx(i), sy(*v)));
+    }
+    let area = format!("{} L {:.1} {} L 0 {} Z", line.trim_end(), sx(n - 1), h, h);
+    let stroke = if win { "var(--gain)" } else { "var(--loss)" };
+    let id = format!("mini_{uniq}");
+    view! {
+        <svg viewBox=format!("0 0 {w} {h}") width="100%" height="100%"
+             preserveAspectRatio="none" style="display:block;">
+            <defs>
+                <linearGradient id=id.clone() x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color=stroke stop-opacity="0.28" />
+                    <stop offset="100%" stop-color=stroke stop-opacity="0.02" />
+                </linearGradient>
+            </defs>
+            <path d=area fill=format!("url(#{id})") />
+            <path d=line fill="none" stroke=stroke stroke-width="3.5"
+                  stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke" />
+        </svg>
+    }.into_view()
+}
+
+/// One curated/saved gallery card: the mini curve fills the card, the kicker +
+/// witty title sit on top (with a Meme tag where applicable), the headline total
+/// return + load/save actions anchor the bottom. Ports `GalleryCard`.
+fn gallery_card(
+    item: &GalleryItem,
+    saved: bool,
+    result: Option<Result<BacktestResult, String>>,
+    on_open: Callback<GalleryItem>,
+    on_toggle: Callback<GalleryItem>,
+) -> View {
+    let is_meme_card = item.meme || is_meme(&item.cfg.action);
+    // Mini curve + headline total from the (lazy) per-card backtest.
+    let (chart, total, win): (View, String, bool) = match result {
+        Some(Ok(r)) => {
+            let data: Vec<f64> = r.curve.iter().map(|p| p.equity).collect();
+            let win = r.metrics.total_return >= 0.0;
+            (mini_equity_chart(&data, win, &item.id), fmt_card_return(r.metrics.total_return), win)
+        }
+        Some(Err(_)) => (
+            view! { <div style="width:100%;height:100%;background:var(--surface-sunken);\
+                    display:flex;align-items:center;justify-content:center;color:var(--text-faint);\
+                    font-family:var(--font-mono);font-size:12px;">"couldn\u{2019}t run"</div> }.into_view(),
+            "\u{2014}".to_string(), false,
+        ),
+        None => (
+            view! { <div style="width:100%;height:100%;background:var(--surface-sunken);\
+                    display:flex;align-items:center;justify-content:center;">
+                    <span style="width:24px;height:24px;border-radius:50%;border:3px solid var(--paper-300);\
+                    border-top-color:var(--accent);animation:bd-spin 0.8s linear infinite;" /></div> }.into_view(),
+            "\u{2026}".to_string(), true,
+        ),
+    };
+    let total_color = if win { "var(--gain-600)" } else { "var(--loss-600)" };
+
+    let it_open = item.clone();
+    let it_open2 = item.clone();
+    let it_save = item.clone();
+    let save_label = if saved { "Remove from collection" } else { "Save to collection" };
+    let save_bg = if saved { "var(--accent)" } else { "rgba(246,241,228,0.94)" };
+    let save_fg = if saved { "var(--paper-50)" } else { "var(--ink-800)" };
+
+    view! {
+        <article class="bd-gallery-card"
+            on:click=move |_| on_open.call(it_open.clone())
+            style="position:relative;aspect-ratio:16 / 10;min-height:264px;cursor:pointer;\
+                   background:var(--surface-card);border:2px solid var(--ink-800);\
+                   border-radius:var(--radius-lg);overflow:hidden;">
+            <div style="position:absolute;inset:0;background:var(--surface-sunken);">{chart}</div>
+            // kicker + title
+            <div style="position:absolute;top:14px;left:16px;right:16px;display:flex;\
+                        align-items:flex-start;justify-content:space-between;gap:8px;">
+                <div style="max-width:84%;">
+                    <div style="font-family:var(--font-mono);font-weight:700;font-size:10.5px;\
+                                letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);margin-bottom:4px;">
+                        {item.kicker.clone()}
+                    </div>
+                    <h3 style="font-family:var(--font-display);font-weight:800;font-size:20px;\
+                               line-height:1.08;letter-spacing:-0.01em;color:var(--text-strong);margin:0;">
+                        {item.title.clone()}
+                    </h3>
+                </div>
+                {is_meme_card.then(|| view! {
+                    <span style="flex:none;font-family:var(--font-mono);font-weight:700;font-size:9.5px;\
+                                 letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-900);\
+                                 background:var(--warn-200);border:2px solid var(--ink-900);\
+                                 border-radius:999px;padding:4px 9px;box-shadow:var(--shadow-hard-sm);">"Meme"</span>
+                })}
+            </div>
+            // total return + actions
+            <div style="position:absolute;bottom:14px;left:16px;right:16px;display:flex;\
+                        align-items:flex-end;justify-content:space-between;gap:10px;">
+                <span style="display:inline-flex;align-items:baseline;gap:6px;font-family:var(--font-mono);\
+                             font-weight:700;font-variant-numeric:tabular-nums;">
+                    <span style=format!("font-size:30px;line-height:0.9;color:{total_color};")>{total}</span>
+                    <span style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);">"total"</span>
+                </span>
+                <div style="display:flex;gap:8px;">
+                    <button type="button" class="bd-float-btn" aria-label=save_label title=save_label
+                        on:click=move |ev| { ev.stop_propagation(); on_toggle.call(it_save.clone()); }
+                        style=format!("width:40px;height:40px;flex:none;display:inline-flex;align-items:center;\
+                               justify-content:center;background:{save_bg};color:{save_fg};padding:0;cursor:pointer;\
+                               border:2px solid var(--ink-900);border-radius:var(--radius-sm);")>
+                        <Icon name="bookmark".to_string() size=18 />
+                    </button>
+                    <button type="button" class="bd-float-btn" aria-label="Load & tweak" title="Load & tweak"
+                        on:click=move |ev| { ev.stop_propagation(); on_open.call(it_open2.clone()); }
+                        style="width:40px;height:40px;flex:none;display:inline-flex;align-items:center;\
+                               justify-content:center;background:var(--accent);color:var(--paper-50);padding:0;\
+                               cursor:pointer;border:2px solid var(--ink-900);border-radius:var(--radius-sm);">
+                        <Icon name="settings-2".to_string() size=18 />
+                    </button>
+                </div>
+            </div>
+        </article>
+    }.into_view()
+}
+
 // ─── ConcernPanel ─────────────────────────────────────────────────────────────
 
 #[component]
@@ -1040,6 +1354,77 @@ fn App() -> impl IntoView {
     let jump_section = Callback::new(move |i: usize| {
         scroll_to(SECTION_IDS.get(i).copied().unwrap_or("top"));
     });
+
+    // ── Gallery: curated wall + localStorage collection + lazy per-card runs ──
+    let preset_items  = store_value(preset_cards());
+    let collection    = create_rw_signal::<Vec<GalleryItem>>(load_collection());
+    let gallery_view  = create_rw_signal("presets".to_string());
+    let loaded_title  = create_rw_signal::<Option<String>>(None);
+    let card_results  =
+        create_rw_signal::<HashMap<String, Option<Result<BacktestResult, String>>>>(HashMap::new());
+    // Persist the collection, and lazily backtest whatever cards are in play.
+    create_effect(move |_| { let c = collection.get(); save_collection(&c); });
+    ensure_cards(card_results, &preset_items.get_value());
+    create_effect(move |_| { let c = collection.get(); ensure_cards(card_results, &c); });
+    // cfg signatures currently saved → drives the bookmark "filled" state + Save button.
+    let saved_sigs = create_memo(move |_| {
+        collection.get().iter().map(|it| it.cfg.sig()).collect::<HashSet<String>>()
+    });
+    // Current config → a GalleryCfg (span mapped from the timeframe until #67).
+    let current_cfg = move || {
+        let yrs = timeframe_years(&timeframe.get());
+        let from_year = if yrs == 0 { 1990 } else { THIS_YEAR.saturating_sub(yrs) };
+        let a = action.get();
+        GalleryCfg {
+            sel_method: sel_method.get(), ticker: ticker.get(), action: a.clone(),
+            from_year, to_year: THIS_YEAR, benchmark: bench_id(&benchmark_ticker.get()).to_string(),
+            realistic: realistic.get(),
+            ticker_b: if a == "pairs" { ticker_b.get() } else { String::new() },
+        }
+    };
+    let cfg_saved = move || saved_sigs.get().contains(&current_cfg().sig());
+    // Open a card → load its cfg into the configurator and scroll to Config.
+    let load_item = Callback::new(move |item: GalleryItem| {
+        let c = item.cfg.clone();
+        action.set(c.action.clone());
+        sel_method.set(c.sel_method.clone());
+        if !c.ticker.is_empty() { ticker.set(c.ticker.clone()); }
+        if c.action == "pairs" {
+            ticker_a.set(c.ticker.clone());
+            if !c.ticker_b.is_empty() { ticker_b.set(c.ticker_b.clone()); }
+        }
+        benchmark_ticker.set(bench_ticker(&c.benchmark).to_string());
+        show_benchmark.set(true);
+        realistic.set(c.realistic);
+        timeframe.set(span_to_timeframe(c.from_year, c.to_year).to_string());
+        loaded_title.set(Some(item.title.clone()));
+        scroll_to("config");
+    });
+    // Bookmark toggle: dedupe by cfg signature (custom items store the whole cfg).
+    let toggle_save = Callback::new(move |item: GalleryItem| {
+        let sig = item.cfg.sig();
+        collection.update(|c| {
+            if let Some(pos) = c.iter().position(|x| x.cfg.sig() == sig) {
+                c.remove(pos);
+            } else {
+                let meme = item.meme || is_meme(&item.cfg.action);
+                c.insert(0, make_collection_item(item.cfg.clone(), Some(item.title.clone()), meme));
+            }
+        });
+    });
+    // Save-the-current-config button on the ConfigScreen.
+    let save_current = move || {
+        let cfg = current_cfg();
+        let sig = cfg.sig();
+        let meme = is_meme(&cfg.action);
+        collection.update(|c| {
+            if let Some(pos) = c.iter().position(|x| x.cfg.sig() == sig) {
+                c.remove(pos);
+            } else {
+                c.insert(0, make_collection_item(cfg.clone(), None, meme));
+            }
+        });
+    };
 
     // Fetch universe once on mount for datalist autocomplete.
     let universe = create_resource(
@@ -1243,18 +1628,82 @@ fn App() -> impl IntoView {
 
         // ── Gallery (placeholder — the wall of curated runs lands in #94) ─────
         <section id="gallery" style="min-height:100vh;display:flex;flex-direction:column;\
-                       justify-content:center;padding:84px 56px;box-sizing:border-box;\
+                       justify-content:flex-start;padding:84px 56px;box-sizing:border-box;\
                        background:var(--surface-page);">
             <div style="max-width:1320px;margin:0 auto;width:100%;">
-                <Overline>"Gallery of broken dreams"</Overline>
-                <h2 style="font-family:var(--font-display);font-weight:800;font-size:36px;\
-                           line-height:1.02;letter-spacing:-0.02em;color:var(--text-strong);margin:12px 0 8px;">
-                    "A wall of broken dreams is coming"
-                </h2>
-                <p style="font-size:15px;color:var(--text-muted);margin:0;max-width:560px;">
-                    "Curated backtests and your saved runs will live here. For now, scroll on \
-                     to build one yourself."
-                </p>
+                // Two-tab header: curated wall × saved collection
+                <div style="display:flex;align-items:flex-end;gap:28px;\
+                            border-bottom:2px solid rgba(28,46,52,0.18);flex-wrap:wrap;">
+                    {[("presets", "Gallery of broken dreams"), ("collection", "My collection")]
+                        .into_iter().map(|(id, label)| {
+                        let id_s = id.to_string();
+                        view! {
+                            <button type="button" on:click=move |_| gallery_view.set(id_s.clone())
+                                style=move || {
+                                    let active = gallery_view.get() == id;
+                                    format!("display:inline-flex;align-items:baseline;gap:8px;\
+                                        padding:4px 2px 12px;background:transparent;border:none;cursor:pointer;\
+                                        font-family:var(--font-display);font-weight:800;font-size:27px;\
+                                        letter-spacing:-0.02em;color:{};border-bottom:3px solid {};\
+                                        margin-bottom:-2px;transition:color var(--dur) var(--ease-out);",
+                                        if active { "var(--text-strong)" } else { "var(--text-faint)" },
+                                        if active { "var(--accent)" } else { "transparent" })
+                                }>
+                                {label}
+                                <span style=move || {
+                                    let active = gallery_view.get() == id;
+                                    format!("font-family:var(--font-mono);font-weight:700;font-size:12px;color:{};",
+                                        if active { "var(--accent)" } else { "var(--text-faint)" })
+                                }>
+                                    {move || if id == "presets" { preset_items.with_value(|p| p.len()) }
+                                             else { collection.get().len() }}
+                                </span>
+                            </button>
+                        }
+                    }).collect_view()}
+                </div>
+
+                // Card wall (or the empty-collection placeholder)
+                <div style="margin-top:26px;">
+                    {move || {
+                        let v = gallery_view.get();
+                        let coll = collection.get();
+                        if v == "collection" && coll.is_empty() {
+                            return view! {
+                                <div style="text-align:center;padding:64px 20px;max-width:460px;margin:0 auto;">
+                                    <span style="display:inline-flex;width:60px;height:60px;border-radius:50%;\
+                                                 background:var(--surface-sunken);border:2px solid var(--ink-800);\
+                                                 align-items:center;justify-content:center;color:var(--ink-500);\
+                                                 margin-bottom:16px;">
+                                        <Icon name="bookmark".to_string() size=28 />
+                                    </span>
+                                    <p style="font-family:var(--font-display);font-weight:800;font-size:22px;\
+                                              color:var(--text-strong);margin:0 0 6px;">"No bags yet. Bold of you."</p>
+                                    <p style="font-size:14px;color:var(--text-muted);margin:0 0 20px;line-height:1.55;">
+                                        "Save a backtest from any preset card or after a run, and it lands here for safekeeping."
+                                    </p>
+                                    <BdButton variant="secondary".to_string() size="md".to_string()
+                                        on_click=Box::new(move || gallery_view.set("presets".to_string()))>
+                                        <Icon name="layout-grid".to_string() size=16 /> "Browse the presets"
+                                    </BdButton>
+                                </div>
+                            }.into_view();
+                        }
+                        let items = if v == "presets" { preset_items.get_value() } else { coll };
+                        let sigs = saved_sigs.get();
+                        let results = card_results.get();
+                        view! {
+                            <div class="bd-gallery-grid" style="display:grid;gap:22px;">
+                                {items.into_iter().map(|it| {
+                                    let sig = it.cfg.sig();
+                                    let saved = sigs.contains(&sig);
+                                    let res = results.get(&sig).cloned().flatten();
+                                    gallery_card(&it, saved, res, load_item, toggle_save)
+                                }).collect_view()}
+                            </div>
+                        }.into_view()
+                    }}
+                </div>
             </div>
         </section>
 
@@ -1266,16 +1715,29 @@ fn App() -> impl IntoView {
         <div style="position:relative;z-index:1;max-width:1320px;margin:0 auto;width:100%;\
                     display:flex;flex-direction:column;gap:var(--space-5);">
 
-            // Section intro
-            <header style="display:flex;flex-direction:column;">
-                <Overline style="color:var(--accent-soft);margin-bottom:8px;">"Configure"</Overline>
-                <h2 style="font-family:var(--font-display);font-weight:800;font-size:36px;\
-                           line-height:1.02;letter-spacing:-0.02em;color:var(--paper-50);margin:0;">
-                    "Build a backtest"
-                </h2>
-                <p style="font-size:15px;color:var(--text-on-ink-muted);margin:8px 0 0;">
-                    "Choose what you trade and how you trade it, then send it back in time."
-                </p>
+            // Section intro (+ save-to-collection)
+            <header style="display:flex;align-items:flex-end;justify-content:space-between;\
+                           gap:20px;flex-wrap:wrap;">
+                <div style="display:flex;flex-direction:column;">
+                    <Overline style="color:var(--accent-soft);margin-bottom:8px;">"Configure"</Overline>
+                    <h2 style="font-family:var(--font-display);font-weight:800;font-size:36px;\
+                               line-height:1.02;letter-spacing:-0.02em;color:var(--paper-50);margin:0;">
+                        {move || loaded_title.get().unwrap_or_else(|| "Build a backtest".to_string())}
+                    </h2>
+                    <p style="font-size:15px;color:var(--text-on-ink-muted);margin:8px 0 0;">
+                        "Choose what you trade and how you trade it, then send it back in time."
+                    </p>
+                </div>
+                {move || {
+                    let saved = cfg_saved();
+                    view! {
+                        <BdButton variant=(if saved { "primary" } else { "secondary" }).to_string()
+                            size="md".to_string() on_click=Box::new(move || save_current())>
+                            <Icon name=(if saved { "check" } else { "bookmark" }).to_string() size=16 />
+                            {if saved { "In your collection" } else { "Save to collection" }}
+                        </BdButton>
+                    }
+                }}
             </header>
 
             // Datalist for ticker autocomplete — populated from /api/universe.
