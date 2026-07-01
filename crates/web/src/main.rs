@@ -740,7 +740,9 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
         }
     });
 
-    let has_trades = r.trades.len() > 1;
+    // Show the Executed-trades panel whenever there's at least one fill — the
+    // prototype renders it even for a single buy-and-hold fill ("1 fill").
+    let has_trades = !r.trades.is_empty();
     let trade_count = r.trades.len();
     let trade_title = format!("{} {}", trade_count, if trade_count == 1 { "fill" } else { "fills" });
     let trade_ticker = r.trades.first().map(|t| t.ticker.clone()).unwrap_or_default();
@@ -1866,66 +1868,62 @@ fn App() -> impl IntoView {
                     }}
                 </div>
 
-                // ── 03 Timeframe ──────────────────────────────────────────────
-                {move || {
-                    view! {
-                        <div>
-                            <div style="display:flex;flex-direction:column;gap:9px;">
-                                {field_heading(Some("03"), "Timeframe", Some("From which year to which?"))}
-                                // From/To year pickers (#67). A To-year past THIS_YEAR
-                                // projects the tail; the To stepper rings accent + a
-                                // callout replaces the "all historical" caption.
-                                {move || {
-                                    const MIN_START: u32 = 1990;
-                                    let max_project = THIS_YEAR + 30;
-                                    let (fy, ty) = (from_year.get(), to_year.get());
-                                    let projecting = ty > THIS_YEAR;
-                                    let bt_years = THIS_YEAR.min(ty).saturating_sub(fy).max(1);
+                // ── 03 Timeframe (boxed panel; From/To side by side) ──────────
+                <ConcernPanel step="03" title="Timeframe"
+                    question="From which year to which?".to_string()>
+                    {move || {
+                        const MIN_START: u32 = 1990;
+                        let max_project = THIS_YEAR + 30;
+                        let (fy, ty) = (from_year.get(), to_year.get());
+                        let projecting = ty > THIS_YEAR;
+                        let bt_years = THIS_YEAR.min(ty).saturating_sub(fy).max(1);
+                        // From/To sit side by side — they fit the full-width panel (#config re-audit).
+                        view! {
+                            <div style="display:flex;flex-direction:column;gap:10px;">
+                                // From | To as two equal columns spanning the full panel
+                                // width (auto-fit → stacks only when there's no room).
+                                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:22px;">
+                                    <div style="display:flex;align-items:center;gap:10px;">
+                                        <span style="font-size:var(--text-sm);font-weight:var(--weight-semibold);color:var(--text-strong);min-width:36px;">"From"</span>
+                                        <BdYearStepper value=fy min=MIN_START max=ty.saturating_sub(1)
+                                            on_change=Callback::new(move |v| from_year.set(v)) />
+                                    </div>
+                                    <div style="display:flex;align-items:center;gap:10px;">
+                                        <span style="font-size:var(--text-sm);font-weight:var(--weight-semibold);color:var(--text-strong);min-width:36px;">"To"</span>
+                                        <BdYearStepper value=ty min=fy + 1 max=max_project
+                                            tone=(if projecting { "accent" } else { "ink" }).to_string()
+                                            on_change=Callback::new(move |v| to_year.set(v)) />
+                                    </div>
+                                </div>
+                                {if projecting {
                                     view! {
-                                        <div style="display:flex;flex-direction:column;gap:10px;">
-                                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                                                <span style="font-size:11.5px;color:var(--text-muted);min-width:36px;">"From"</span>
-                                                <BdYearStepper value=fy min=MIN_START max=ty.saturating_sub(1)
-                                                    on_change=Callback::new(move |v| from_year.set(v)) />
-                                            </div>
-                                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                                                <span style="font-size:11.5px;color:var(--text-muted);min-width:36px;">"To"</span>
-                                                <BdYearStepper value=ty min=fy + 1 max=max_project
-                                                    tone=(if projecting { "accent" } else { "ink" }).to_string()
-                                                    on_change=Callback::new(move |v| to_year.set(v)) />
-                                            </div>
-                                            {if projecting {
-                                                view! {
-                                                    <div style="display:flex;align-items:flex-start;gap:7px;margin-top:2px;\
-                                                        padding:8px 10px;background:rgba(178,58,28,0.08);\
-                                                        border:1px solid var(--accent);border-radius:var(--radius-sm);">
-                                                        <span style="flex:0 0 auto;margin-top:1px;color:var(--accent);">
-                                                            <Icon name="trending-up".to_string() size=14 />
-                                                        </span>
-                                                        <span style="font-size:11.5px;color:var(--text-muted);line-height:1.45;">
-                                                            {format!("Backtest runs {fy}\u{2013}{THIS_YEAR}; ")}
-                                                            <strong style="color:var(--text-strong);">
-                                                                {format!("{THIS_YEAR}\u{2013}{ty} is projected")}
-                                                            </strong>
-                                                            " \u{2014} a bootstrap forecast, not historical data."
-                                                        </span>
-                                                    </div>
-                                                }.into_view()
-                                            } else {
-                                                view! {
-                                                    <span style="font-size:11.5px;color:var(--text-faint);\
-                                                        font-family:var(--font-mono);margin-top:2px;">
-                                                        {format!("{bt_years}y backtest \u{00b7} all historical")}
-                                                    </span>
-                                                }.into_view()
-                                            }}
+                                        <div style="display:flex;align-items:flex-start;gap:7px;margin-top:2px;\
+                                            padding:8px 10px;background:rgba(178,58,28,0.08);\
+                                            border:1px solid var(--accent);border-radius:var(--radius-sm);">
+                                            <span style="flex:0 0 auto;margin-top:1px;color:var(--accent);">
+                                                <Icon name="trending-up".to_string() size=14 />
+                                            </span>
+                                            <span style="font-size:11.5px;color:var(--text-muted);line-height:1.45;">
+                                                {format!("Backtest runs {fy}\u{2013}{THIS_YEAR}; ")}
+                                                <strong style="color:var(--text-strong);">
+                                                    {format!("{THIS_YEAR}\u{2013}{ty} is projected")}
+                                                </strong>
+                                                " \u{2014} a bootstrap forecast, not historical data."
+                                            </span>
                                         </div>
-                                    }
+                                    }.into_view()
+                                } else {
+                                    view! {
+                                        <span style="font-size:11.5px;color:var(--text-faint);\
+                                            font-family:var(--font-mono);margin-top:2px;">
+                                            {format!("{bt_years}y backtest \u{00b7} all historical")}
+                                        </span>
+                                    }.into_view()
                                 }}
                             </div>
-                        </div>
-                    }
-                }}
+                        }
+                    }}
+                </ConcernPanel>
 
                 // ── 04 Parameters (initial amount + conditional strategy params) ──
                 // Amount always shows (every run needs it) — this gives the field a
