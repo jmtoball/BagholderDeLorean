@@ -361,10 +361,24 @@ pub fn BdSelect(
     #[prop(optional)]                   label: Option<String>,
     #[prop(optional)]                   hint: Option<String>,
     #[prop(default = "md".to_string())] size: String,
+    /// Controlled value: forces the shown option to match, even when a reactive
+    /// parent re-creates the select. `None` = uncontrolled (native default).
+    #[prop(optional)]                   value: Option<String>,
     #[prop(optional)]                   on_change: Option<Box<dyn Fn(String) + 'static>>,
     children: Children,
 ) -> impl IntoView {
     let (focused, set_focused) = create_signal(false);
+
+    // Controlled value: a native <select> shows its first option when re-created
+    // with no selection, so set `.value` in an effect once the element (and its
+    // options) are mounted. `prop:value` runs too early — before the options exist.
+    let select_ref = create_node_ref::<html::Select>();
+    let controlled = value.clone();
+    create_effect(move |_| {
+        if let (Some(el), Some(v)) = (select_ref.get(), controlled.as_ref()) {
+            el.set_value(v);
+        }
+    });
 
     let height    = match size.as_str() { "sm" => "var(--control-sm)", "lg" => "var(--control-lg)", _ => "var(--control-md)" };
     let font_size = if size == "sm" { "var(--text-sm)" } else { "var(--text-base)" };
@@ -393,6 +407,7 @@ pub fn BdSelect(
             })}
             <span style=wrap_style>
                 <select
+                    node_ref=select_ref
                     style=select_style
                     on:focus=move |_| set_focused.set(true)
                     on:blur=move |_| set_focused.set(false)

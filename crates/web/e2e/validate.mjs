@@ -312,6 +312,51 @@ await step('Regime-Filtered Mean Reversion', async () => {
   await shot('06-meanrev');
 });
 
+// ─── 6b. Savings Plan benchmark (#92) ────────────────────────────────────────
+
+await step('Savings Plan — rate/contribution/compound params drive the result (#92)', async () => {
+  await actionSelect().selectOption('savings');
+  // The dropdown must reflect the pick (BdSelect controlled value) — it used to
+  // snap back to the first option on the reactive re-render.
+  const shown = await page.evaluate(() => {
+    const s = document.querySelector('#config select');
+    return s.options[s.selectedIndex]?.text ?? '';
+  });
+  if (!/savings plan/i.test(shown)) fail(`strategy select shows "${shown}", not Savings Plan`);
+  else ok('strategy select reflects the Savings Plan pick');
+
+  await page.waitForFunction(() => /Annual rate/i.test(document.body.innerText), undefined, { timeout: 5000 });
+  ok('savings params (annual rate) visible');
+  // Set annual rate 7% and a $3,000 yearly contribution.
+  await page.evaluate(() => {
+    const ins = [...document.querySelectorAll('#config input')];
+    const lbl = (i) => i.closest('label')?.querySelector('span')?.textContent ?? '';
+    const rate = ins.find((i) => /Annual rate/i.test(lbl(i)));
+    const contrib = ins.find((i) => /contribution/i.test(lbl(i)));
+    if (rate) { rate.value = '7'; rate.dispatchEvent(new Event('input', { bubbles: true })); }
+    if (contrib) { contrib.value = '3000'; contrib.dispatchEvent(new Event('input', { bubbles: true })); }
+  });
+  await runBtn().click();
+  await waitForResult();
+
+  const sim = await page.locator('#simulation').innerText();
+  const fv = sim.match(/FINAL VALUE\s*\n?\s*\$([\d,]+)/i)?.[1];
+  const fvNum = fv ? Number(fv.replace(/,/g, '')) : 0;
+  // $10k start growing at 7% with $3k/yr contributions ends above the starting
+  // sum (catches the $0 bug) and within a sane range (catches a garbage blow-up).
+  // Window-independent — prior steps may have left a shorter timeframe.
+  if (fvNum > 10000 && fvNum < 5_000_000) ok(`savings plan renders a sane final value: $${fv}`);
+  else fail(`savings final value looks wrong: $${fv}`);
+  // A savings plan is a smooth, riskless line — no discrete trades panel, and no
+  // garbage Sharpe from a near-zero-variance return series.
+  if (/EXECUTED TRADES/i.test(sim)) fail('savings plan should not show a trades panel');
+  else ok('no trades panel for the savings plan');
+  const sharpe = sim.match(/SHARPE RATIO\s*\n?\s*([-\d.]+)/i)?.[1];
+  if (sharpe && Math.abs(Number(sharpe)) < 1000) ok(`Sharpe is sane: ${sharpe}`);
+  else fail(`Sharpe looks broken: ${sharpe}`);
+  await shot('06b-savings');
+});
+
 // ─── 7. Timeframe — From/To year pickers (#67) ───────────────────────────────
 
 await step('Timeframe year pickers: From −5 slices the window', async () => {
