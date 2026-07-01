@@ -354,9 +354,12 @@ fn de_knobs(
                         <span style=MINI_LABEL>"Teilfreistellung"</span>
                         {move || {
                             let on = estimate.get();
-                            let dim = format!("flex:1;opacity:{};pointer-events:{};", if on { "1" } else { "0.45" }, if on { "auto" } else { "none" });
+                            // min-width:0 lets the input shrink inside the narrow two-up
+                            // cell instead of overflowing into Vorabpauschale (matches the
+                            // prototype's flex:1, minWidth:0).
+                            let dim = format!("flex:1;min-width:0;opacity:{};pointer-events:{};", if on { "1" } else { "0.45" }, if on { "auto" } else { "none" });
                             view! {
-                                <div style="display:flex;align-items:center;gap:10px;">
+                                <div style="display:flex;align-items:center;gap:8px;">
                                     <BdSwitch checked=on on_change=Box::new(move |v| estimate.set(v)) />
                                     <div style=dim>
                                         <BdInput mono=true suffix="%".to_string()
