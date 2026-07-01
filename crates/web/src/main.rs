@@ -255,6 +255,10 @@ fn us_lt_bracket(income: f64) -> f64 {
 
 // Shared knob-panel styles (mirror KnobGrid / MiniLabel in TaxSim.jsx).
 const KNOB_GRID: &str = "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;padding:16px;background:var(--surface-sunken);border:2px solid var(--ink-800);border-radius:var(--radius-md);";
+// German knobs stay two-up even in the narrow tax column (unlike the US auto-fit
+// grid), so the Abgeltungsteuer panel keeps a compact vertical footprint. Mirrors
+// `pairGrid` in TaxSim.jsx (#105).
+const PAIR_GRID: &str = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding:14px;background:var(--surface-sunken);border:2px solid var(--ink-800);border-radius:var(--radius-md);";
 const MINI_LABEL: &str = "display:block;font-weight:600;font-size:12.5px;color:var(--text-strong);margin-bottom:7px;";
 const RATE_NUM: &str = "font-family:var(--font-mono);font-variant-numeric:tabular-nums;font-weight:700;font-size:24px;letter-spacing:-0.02em;color:var(--accent);";
 const RATE_CAP: &str = "display:block;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-muted);margin-top:2px;";
@@ -322,21 +326,21 @@ fn de_knobs(
     estimate: RwSignal<bool>, teilfrei: RwSignal<f64>,
 ) -> View {
     view! {
-        <div style="display:flex;flex-direction:column;gap:14px;">
-            <div style=KNOB_GRID>
+        <div style="display:flex;flex-direction:column;gap:12px;">
+            <div style=PAIR_GRID>
                 <div>
                     <span style=MINI_LABEL>"Tax-free allowance"</span>
                     <BdInput mono=true prefix="\u{20ac}".to_string()
                         value=format!("{:.0}", allowance.get_untracked())
                         on_input=Box::new(move |v| { if let Ok(n) = v.replace(',', "").parse::<f64>() { allowance.set(n.max(0.0)); } }) />
-                    <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Sparerpauschbetrag \u{2014} exempt per year (\u{20ac}1,000 in 2025)."</span>
+                    <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Sparerpauschbetrag / year."</span>
                 </div>
                 <div>
                     <span style=MINI_LABEL>"Church tax"</span>
                     <div style="display:flex;align-items:center;min-height:var(--control-md);">
                         {move || { let on = church.get(); view! { <BdSwitch checked=on on_change=Box::new(move |v| church.set(v)) label=(if on { "On" } else { "Off" }).to_string() /> } }}
                     </div>
-                    <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Adds Kirchensteuer (~+1.4 pts) on top of the base rate."</span>
+                    <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Kirchensteuer, ~+1.4 pts."</span>
                 </div>
             </div>
 
@@ -345,14 +349,17 @@ fn de_knobs(
                     <span style="font-weight:700;font-size:10.5px;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);">"ETF rules \u{b7} applied to ETF holdings"</span>
                     <span style="flex:1;height:2px;background:var(--paper-300);" />
                 </div>
-                <div style=KNOB_GRID>
+                <div style=PAIR_GRID>
                     <div>
                         <span style=MINI_LABEL>"Teilfreistellung"</span>
                         {move || {
                             let on = estimate.get();
-                            let dim = format!("flex:1;opacity:{};pointer-events:{};", if on { "1" } else { "0.45" }, if on { "auto" } else { "none" });
+                            // min-width:0 lets the input shrink inside the narrow two-up
+                            // cell instead of overflowing into Vorabpauschale (matches the
+                            // prototype's flex:1, minWidth:0).
+                            let dim = format!("flex:1;min-width:0;opacity:{};pointer-events:{};", if on { "1" } else { "0.45" }, if on { "auto" } else { "none" });
                             view! {
-                                <div style="display:flex;align-items:center;gap:10px;">
+                                <div style="display:flex;align-items:center;gap:8px;">
                                     <BdSwitch checked=on on_change=Box::new(move |v| estimate.set(v)) />
                                     <div style=dim>
                                         <BdInput mono=true suffix="%".to_string()
@@ -362,18 +369,18 @@ fn de_knobs(
                                 </div>
                             }
                         }}
-                        <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Share of ETF gains exempt (equity ETFs: 30%)."</span>
+                        <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Share of ETF gains exempt."</span>
                     </div>
                     <div>
                         <span style=MINI_LABEL>"Vorabpauschale"</span>
                         <div style="display:flex;align-items:center;min-height:var(--control-md);">
                             {move || { let on = vorab.get(); view! { <BdSwitch checked=on on_change=Box::new(move |v| vorab.set(v)) label=(if on { "On" } else { "Off" }).to_string() /> } }}
                         </div>
-                        <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Taxes a notional advance each year you hold."</span>
+                        <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Notional advance taxed yearly."</span>
                     </div>
                 </div>
                 <div style="margin-top:10px;">
-                    {note_line("Simplification: ETF rules apply to every ETF position; your direct stocks keep the full rate. Only equity ETFs (\u{2265}51% stocks) actually qualify for the 30% Teilfreistellung \u{2014} bond or low-equity funds get less, or none.")}
+                    {note_line("ETF rules apply to ETF positions only; direct stocks keep the full rate. Equity ETFs (\u{2265}51% stocks) qualify for the 30% relief.")}
                 </div>
             </div>
 
@@ -662,6 +669,19 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
     let bag          = r.metrics.max_drawdown < -0.30;
     let opp_pct      = (r.metrics.max_drawdown.abs() * 100.0).round() as i64;
     let mdd_bag      = fmt_pct(r.metrics.max_drawdown);
+    // KPI value tinting (good/bad), mirroring PriceResults.jsx (#105). Return/CAGR
+    // are green when positive; a ratio is green ≥1 and red <0; drawdown reds past
+    // −20%. Final value stays neutral (it's always positive, carries no verdict).
+    let gl = |good: bool| if good { "gain" } else { "loss" }.to_string();
+    let ratio_tone = |v: f64| if v >= 1.0 { "gain" } else if v < 0.0 { "loss" } else { "" }.to_string();
+    let ret_tone      = gl(r.metrics.total_return >= 0.0);
+    let cagr_tone     = gl(r.metrics.cagr >= 0.0);
+    let mdd_tone      = if r.metrics.max_drawdown <= -0.2 { "loss" } else { "" }.to_string();
+    let sharpe_tone   = ratio_tone(r.metrics.sharpe);
+    let sortino_tone  = ratio_tone(r.metrics.sortino);
+    let recovery_val  = if r.metrics.max_drawdown >= 0.0 { f64::INFINITY }
+                        else { r.metrics.recovery_factor };
+    let recovery_tone = ratio_tone(recovery_val);
 
     let gy1 = format!("{:.1}", PAD + (H - PAD * 2.0) * 0.25);
     let gy2 = format!("{:.1}", PAD + (H - PAD * 2.0) * 0.50);
@@ -720,7 +740,9 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
         }
     });
 
-    let has_trades = r.trades.len() > 1;
+    // Show the Executed-trades panel whenever there's at least one fill — the
+    // prototype renders it even for a single buy-and-hold fill ("1 fill").
+    let has_trades = !r.trades.is_empty();
     let trade_count = r.trades.len();
     let trade_title = format!("{} {}", trade_count, if trade_count == 1 { "fill" } else { "fills" });
     let trade_ticker = r.trades.first().map(|t| t.ticker.clone()).unwrap_or_default();
@@ -829,22 +851,22 @@ fn equity_single(r: &BacktestResult, label: &str) -> View {
                     <BdStat label="Final value".to_string() value=final_str size="sm".to_string() />
                 </BdCard>
                 <BdCard padding="16px".to_string()>
-                    <BdStat label="Total return".to_string() value=total_ret_s size="sm".to_string() />
+                    <BdStat label="Total return".to_string() value=total_ret_s value_tone=ret_tone size="sm".to_string() />
                 </BdCard>
                 <BdCard padding="16px".to_string()>
-                    <BdStat label="CAGR".to_string() value=cagr_str size="sm".to_string() />
+                    <BdStat label="CAGR".to_string() value=cagr_str value_tone=cagr_tone size="sm".to_string() />
                 </BdCard>
                 <BdCard padding="16px".to_string()>
-                    <BdStat label="Max drawdown".to_string() value=mdd_str size="sm".to_string() />
+                    <BdStat label="Max drawdown".to_string() value=mdd_str value_tone=mdd_tone size="sm".to_string() />
                 </BdCard>
                 <BdCard padding="16px".to_string()>
-                    <BdStat label="Sharpe ratio".to_string() value=sharpe_str size="sm".to_string() />
+                    <BdStat label="Sharpe ratio".to_string() value=sharpe_str value_tone=sharpe_tone size="sm".to_string() />
                 </BdCard>
                 <BdCard padding="16px".to_string()>
-                    <BdStat label="Sortino ratio".to_string() value=sortino_str size="sm".to_string() />
+                    <BdStat label="Sortino ratio".to_string() value=sortino_str value_tone=sortino_tone size="sm".to_string() />
                 </BdCard>
                 <BdCard padding="16px".to_string()>
-                    <BdStat label="Recovery factor".to_string() value=recovery_str size="sm".to_string() />
+                    <BdStat label="Recovery factor".to_string() value=recovery_str value_tone=recovery_tone size="sm".to_string() />
                 </BdCard>
             </div>
 
@@ -1625,7 +1647,10 @@ fn App() -> impl IntoView {
         <section id="gallery" style="min-height:100vh;display:flex;flex-direction:column;\
                        justify-content:flex-start;padding:84px 56px;box-sizing:border-box;\
                        background:var(--surface-page);">
-            <div style="max-width:1320px;margin:0 auto;width:100%;">
+            // Full-bleed within the section (only the 56px section padding) — the
+            // prototype's GalleryScreen renders the wall with no 1320 cap (unlike
+            // Hero/Config), so it fills the viewport width. (#105)
+            <div style="width:100%;">
                 // Two-tab header: curated wall × saved collection
                 <div style="display:flex;align-items:flex-end;gap:28px;\
                             border-bottom:2px solid rgba(28,46,52,0.18);flex-wrap:wrap;">
@@ -1843,18 +1868,84 @@ fn App() -> impl IntoView {
                     }}
                 </div>
 
-                // ── 03 Parameters (conditional) ───────────────────────────────
+                // ── 03 Timeframe (boxed panel; From/To side by side) ──────────
+                <ConcernPanel step="03" title="Timeframe"
+                    question="From which year to which?".to_string()>
+                    {move || {
+                        const MIN_START: u32 = 1990;
+                        let max_project = THIS_YEAR + 30;
+                        let (fy, ty) = (from_year.get(), to_year.get());
+                        let projecting = ty > THIS_YEAR;
+                        let bt_years = THIS_YEAR.min(ty).saturating_sub(fy).max(1);
+                        // From/To sit side by side — they fit the full-width panel (#config re-audit).
+                        view! {
+                            <div style="display:flex;flex-direction:column;gap:10px;">
+                                // From | To as two equal columns spanning the full panel
+                                // width (auto-fit → stacks only when there's no room).
+                                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:22px;">
+                                    <div style="display:flex;align-items:center;gap:10px;">
+                                        <span style="font-size:var(--text-sm);font-weight:var(--weight-semibold);color:var(--text-strong);min-width:36px;">"From"</span>
+                                        <BdYearStepper value=fy min=MIN_START max=ty.saturating_sub(1)
+                                            on_change=Callback::new(move |v| from_year.set(v)) />
+                                    </div>
+                                    <div style="display:flex;align-items:center;gap:10px;">
+                                        <span style="font-size:var(--text-sm);font-weight:var(--weight-semibold);color:var(--text-strong);min-width:36px;">"To"</span>
+                                        <BdYearStepper value=ty min=fy + 1 max=max_project
+                                            tone=(if projecting { "accent" } else { "ink" }).to_string()
+                                            on_change=Callback::new(move |v| to_year.set(v)) />
+                                    </div>
+                                </div>
+                                {if projecting {
+                                    view! {
+                                        <div style="display:flex;align-items:flex-start;gap:7px;margin-top:2px;\
+                                            padding:8px 10px;background:rgba(178,58,28,0.08);\
+                                            border:1px solid var(--accent);border-radius:var(--radius-sm);">
+                                            <span style="flex:0 0 auto;margin-top:1px;color:var(--accent);">
+                                                <Icon name="trending-up".to_string() size=14 />
+                                            </span>
+                                            <span style="font-size:11.5px;color:var(--text-muted);line-height:1.45;">
+                                                {format!("Backtest runs {fy}\u{2013}{THIS_YEAR}; ")}
+                                                <strong style="color:var(--text-strong);">
+                                                    {format!("{THIS_YEAR}\u{2013}{ty} is projected")}
+                                                </strong>
+                                                " \u{2014} a bootstrap forecast, not historical data."
+                                            </span>
+                                        </div>
+                                    }.into_view()
+                                } else {
+                                    view! {
+                                        <span style="font-size:11.5px;color:var(--text-faint);\
+                                            font-family:var(--font-mono);margin-top:2px;">
+                                            {format!("{bt_years}y backtest \u{00b7} all historical")}
+                                        </span>
+                                    }.into_view()
+                                }}
+                            </div>
+                        }
+                    }}
+                </ConcernPanel>
+
+                // ── 04 Parameters (initial amount + conditional strategy params) ──
+                // Amount always shows (every run needs it) — this gives the field a
+                // home in the Parameters panel instead of floating on its own.
                 {move || {
                     let a = action.get();
-                    let show = matches!(a.as_str(), "sma"|"golden"|"btfd"|"pairs"|"sectorrot"|"congress");
-                    show.then(|| view! {
+                    view! {
                         <div style="display:flex;flex-direction:column;gap:9px;">
                             <div style="display:flex;align-items:baseline;gap:7px;padding-left:2px;">
-                                <span style="font-family:var(--font-mono);font-weight:700;font-size:var(--text-micro);color:var(--accent);">"03"</span>
+                                <span style="font-family:var(--font-mono);font-weight:700;font-size:var(--text-micro);color:var(--accent);">"04"</span>
                                 <span style="font-weight:700;font-size:var(--text-micro);letter-spacing:0.1em;text-transform:uppercase;color:var(--text-strong);">"Parameters"</span>
                             </div>
-                            <div style="padding:var(--space-4);background:var(--surface-sunken);\
+                            <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end;\
+                                        padding:var(--space-4);background:var(--surface-sunken);\
                                         border:var(--border-line) solid var(--ink-800);border-radius:var(--radius-md);">
+                                <div style="width:150px;">
+                                    <BdInput label="Amount ($)".to_string() mono=true placeholder="10000".to_string()
+                                        value=format!("{:.0}", initial_amount.get_untracked())
+                                        on_input=Box::new(move |v| {
+                                            if let Ok(n) = v.parse::<f64>() { if n > 0.0 { initial_amount.set(n); } }
+                                        }) />
+                                </div>
                                 {match a.as_str() {
                                     "sma" | "golden" => view! {
                                         <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
@@ -1908,8 +1999,8 @@ fn App() -> impl IntoView {
                                                 on_input=Box::new(move |v| top_n.set(v.parse().unwrap_or(3))) />
                                         </div>
                                     }.into_view(),
-                                    _ => view! { // congress
-                                        <div>
+                                    "congress" => view! {
+                                        <div style="max-width:340px;">
                                             <BdSwitch
                                                 checked=realistic.get()
                                                 label=if realistic.get() {
@@ -1924,82 +2015,7 @@ fn App() -> impl IntoView {
                                             </p>
                                         </div>
                                     }.into_view(),
-                                }}
-                            </div>
-                        </div>
-                    })
-                }}
-
-                // ── Amount + Timeframe ────────────────────────────────────────
-                {move || {
-                    let a       = action.get();
-                    let has_p03 = matches!(a.as_str(), "sma"|"golden"|"btfd"|"pairs"|"sectorrot"|"congress");
-                    let step    = if has_p03 { "04" } else { "03" };
-                    view! {
-                        <div style="display:grid;\
-                                    grid-template-columns:repeat(auto-fit,minmax(220px,1fr));\
-                                    gap:14px;align-items:end;">
-                            <div style="display:flex;flex-direction:column;gap:9px;max-width:220px;">
-                                {field_heading(None, "Amount $", Some("How much do you put in?"))}
-                                <BdInput mono=true placeholder="10000".to_string()
-                                    value=format!("{:.0}", initial_amount.get_untracked())
-                                    on_input=Box::new(move |v| {
-                                        if let Ok(n) = v.parse::<f64>() {
-                                            if n > 0.0 { initial_amount.set(n); }
-                                        }
-                                    }) />
-                            </div>
-                            <div style="display:flex;flex-direction:column;gap:9px;">
-                                {field_heading(Some(step), "Timeframe", Some("From which year to which?"))}
-                                // From/To year pickers (#67). A To-year past THIS_YEAR
-                                // projects the tail; the To stepper rings accent + a
-                                // callout replaces the "all historical" caption.
-                                {move || {
-                                    const MIN_START: u32 = 1990;
-                                    let max_project = THIS_YEAR + 30;
-                                    let (fy, ty) = (from_year.get(), to_year.get());
-                                    let projecting = ty > THIS_YEAR;
-                                    let bt_years = THIS_YEAR.min(ty).saturating_sub(fy).max(1);
-                                    view! {
-                                        <div style="display:flex;flex-direction:column;gap:10px;">
-                                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                                                <span style="font-size:11.5px;color:var(--text-muted);min-width:36px;">"From"</span>
-                                                <BdYearStepper value=fy min=MIN_START max=ty.saturating_sub(1)
-                                                    on_change=Callback::new(move |v| from_year.set(v)) />
-                                            </div>
-                                            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                                                <span style="font-size:11.5px;color:var(--text-muted);min-width:36px;">"To"</span>
-                                                <BdYearStepper value=ty min=fy + 1 max=max_project
-                                                    tone=(if projecting { "accent" } else { "ink" }).to_string()
-                                                    on_change=Callback::new(move |v| to_year.set(v)) />
-                                            </div>
-                                            {if projecting {
-                                                view! {
-                                                    <div style="display:flex;align-items:flex-start;gap:7px;margin-top:2px;\
-                                                        padding:8px 10px;background:rgba(178,58,28,0.08);\
-                                                        border:1px solid var(--accent);border-radius:var(--radius-sm);">
-                                                        <span style="flex:0 0 auto;margin-top:1px;color:var(--accent);">
-                                                            <Icon name="trending-up".to_string() size=14 />
-                                                        </span>
-                                                        <span style="font-size:11.5px;color:var(--text-muted);line-height:1.45;">
-                                                            {format!("Backtest runs {fy}\u{2013}{THIS_YEAR}; ")}
-                                                            <strong style="color:var(--text-strong);">
-                                                                {format!("{THIS_YEAR}\u{2013}{ty} is projected")}
-                                                            </strong>
-                                                            " \u{2014} a bootstrap forecast, not historical data."
-                                                        </span>
-                                                    </div>
-                                                }.into_view()
-                                            } else {
-                                                view! {
-                                                    <span style="font-size:11.5px;color:var(--text-faint);\
-                                                        font-family:var(--font-mono);margin-top:2px;">
-                                                        {format!("{bt_years}y backtest \u{00b7} all historical")}
-                                                    </span>
-                                                }.into_view()
-                                            }}
-                                        </div>
-                                    }
+                                    _ => view! { <></> }.into_view(),
                                 }}
                             </div>
                         </div>
@@ -2188,7 +2204,7 @@ fn App() -> impl IntoView {
                        padding:84px 56px 56px;box-sizing:border-box;background:var(--surface-sunken);\
                        border-top:var(--border-bold) solid var(--ink-900);">
             <header style="display:flex;align-items:flex-end;justify-content:space-between;gap:20px;\
-                           margin:0 auto 22px;max-width:1320px;width:100%;flex-wrap:wrap;">
+                           margin:0 0 22px;width:100%;flex-wrap:wrap;">
                 <div>
                     <Overline>"Simulation"</Overline>
                     <h2 style="font-family:var(--font-display);font-weight:800;font-size:36px;\
@@ -2209,7 +2225,8 @@ fn App() -> impl IntoView {
             <div style=move || {
                 let ran = single_result.get().is_some() || candidates.get().is_some();
                 let justify = if ran && !busy.get() { "flex-start" } else { "center" };
-                format!("flex:1;min-height:0;max-width:1320px;width:100%;margin:0 auto;\
+                // Full-bleed + flex:1 so results fill the section's width and height (#105).
+                format!("flex:1;min-height:0;width:100%;\
                          display:flex;flex-direction:column;justify-content:{justify};")
             }>
 

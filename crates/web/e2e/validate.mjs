@@ -559,6 +559,77 @@ await step('P/E mini-charts and trough stepper', async () => {
   await shot('14-pe-step');
 });
 
+// ─── 14a. Design re-audit: full-bleed screens, KPI tint, compact DE tax (#105) ─
+
+await step('Gallery and Simulation content fills the section width (#105)', async () => {
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.waitForFunction(() => /baghold/i.test(document.querySelector('h1')?.textContent ?? ''), undefined, { timeout: 15000 });
+  const vw = await page.evaluate(() => window.innerWidth);
+  // Gallery wall spans (near) the full section width — only the 56px padding, no 1320 cap.
+  await page.locator('#gallery').scrollIntoViewIfNeeded();
+  await page.waitForFunction(
+    () => [...document.querySelectorAll('#gallery article')].filter((a) => /[+−×]\d/.test(a.innerText)).length >= 5,
+    undefined, { timeout: 90000 },
+  );
+  const wall = await page.evaluate(() => {
+    const c = [...document.querySelectorAll('#gallery article')];
+    return { l: Math.min(...c.map((x) => x.getBoundingClientRect().left)), r: Math.max(...c.map((x) => x.getBoundingClientRect().right)) };
+  });
+  if (wall.l > 80 || wall.r < vw - 80) fail(`gallery wall not full-bleed (x ${Math.round(wall.l)}→${Math.round(wall.r)} of ${vw})`);
+  else ok(`gallery wall fills the section width (x ${Math.round(wall.l)}→${Math.round(wall.r)} of ${vw})`);
+  await shot('14a-gallery-fullbleed');
+});
+
+await step('Simulation KPI values are tinted red/green (#105)', async () => {
+  await page.locator('#config').scrollIntoViewIfNeeded();
+  await actionSelect().selectOption('buyhold');
+  await page.locator('input:not([type="checkbox"])').first().fill('AAPL');
+  await runBtn().click();
+  await waitForResult();
+  await page.locator('#simulation').scrollIntoViewIfNeeded();
+  await page.waitForTimeout(300);
+  // Read the value-span color for a labelled KPI card.
+  const valColor = (label) => page.evaluate((lab) => {
+    const box = [...document.querySelectorAll('#simulation div')].find((d) => d.textContent.startsWith(lab));
+    if (!box) return null;
+    const v = [...box.querySelectorAll('span')].find((s) => /[+−%\d]/.test(s.textContent) && s.style.fontFamily.includes('mono'));
+    return v ? getComputedStyle(v).color : null;
+  }, label);
+  const gain = 'rgb(94, 146, 112)'; // --gain-500
+  const loss = 'rgb(194, 86, 74)';  // --loss-500
+  const ret = await valColor('Total return');
+  const mdd = await valColor('Max drawdown');
+  if (ret !== gain) fail(`Total return not tinted gain (got ${ret})`);
+  else ok('a positive KPI (Total return) carries the gain color');
+  if (mdd !== loss) fail(`Max drawdown not tinted loss (got ${mdd})`);
+  else ok('a negative KPI (Max drawdown) carries the loss color');
+  await shot('14a-kpi-tint');
+});
+
+await step('German (Abgeltungsteuer) tax config is a compact two-column panel (#105)', async () => {
+  await page.locator('#config').scrollIntoViewIfNeeded();
+  await page.locator('button:has-text("Add tax simulation")').click({ force: true });
+  await page.waitForTimeout(300);
+  await page.locator('button[role="tab"]:has-text("Germany")').click({ force: true });
+  await page.waitForTimeout(400);
+  const cfg = await page.locator('#config').innerText();
+  if (!/Teilfreistellung/.test(cfg) || !/Vorabpauschale/.test(cfg)) fail('German knobs did not render');
+  else ok('German knobs render (Teilfreistellung, Vorabpauschale)');
+  // Compact = each pair sits on one row (2-up), not stacked.
+  const rowY = (label) => page.evaluate((lab) => {
+    const el = [...document.querySelectorAll('#config span')].find((s) => s.textContent.trim() === lab);
+    return el ? Math.round(el.getBoundingClientRect().top) : null;
+  }, label);
+  const [aY, cY, tY, vY] = await Promise.all([rowY('Tax-free allowance'), rowY('Church tax'), rowY('Teilfreistellung'), rowY('Vorabpauschale')]);
+  if (aY == null || cY == null || Math.abs(aY - cY) > 6) fail(`allowance/church not two-up (y ${aY}/${cY})`);
+  else ok('allowance + church share a row (two-up)');
+  if (tY == null || vY == null || Math.abs(tY - vY) > 6) fail(`Teilfreistellung/Vorabpauschale not two-up (y ${tY}/${vY})`);
+  else ok('Teilfreistellung + Vorabpauschale share a row (two-up)');
+  await shot('14a-tax-de-compact');
+  // Reset for any later steps.
+  await page.locator('button:has-text("Remove")').first().click({ force: true }).catch(() => {});
+});
+
 // ─── 15. Console errors ───────────────────────────────────────────────────────
 
 await step('No JS page errors', async () => {

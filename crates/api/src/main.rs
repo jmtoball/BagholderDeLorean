@@ -538,7 +538,7 @@ async fn preset_backtest(
             &bars_by_ticker,
             move |history, _| pairs_alloc(history, &ta2, &tb2, win, entry_z),
             &cfg, 10_000.0, &FillCosts::ZERO, 0.0,
-        );
+        ).with_amount(10_000.0);
         return Ok(Json(result));
     }
 
@@ -574,7 +574,7 @@ async fn preset_backtest(
             10_000.0,
             &FillCosts::ZERO,
             0.0,
-        );
+        ).with_amount(10_000.0);
         return Ok(Json(result));
     }
 
@@ -618,7 +618,7 @@ async fn preset_backtest(
         &FillCosts::ZERO,
         0.0,
     );
-    Ok(Json(result))
+    Ok(Json(result.with_amount(10_000.0)))
 }
 
 fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
@@ -737,11 +737,18 @@ async fn main() {
     let shutdown = {
         let last = last_active.clone();
         let running = backfill_running.clone();
+        // Idle timeout is overridable for local dev — set BAGHOLDER_IDLE_SHUTDOWN_SECS=0
+        // to never self-exit (so a locally-run server survives while you poke at it).
+        let idle_secs = std::env::var("BAGHOLDER_IDLE_SHUTDOWN_SECS")
+            .ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(IDLE_SHUTDOWN_SECS);
         async move {
             let idle = async {
+                if idle_secs == 0 {
+                    std::future::pending::<()>().await; // never idle-shut down
+                }
                 loop {
                     tokio::time::sleep(Duration::from_secs(30)).await;
-                    let quiet = now_secs().saturating_sub(last.load(Ordering::Relaxed)) >= IDLE_SHUTDOWN_SECS;
+                    let quiet = now_secs().saturating_sub(last.load(Ordering::Relaxed)) >= idle_secs;
                     if quiet && !running.load(Ordering::SeqCst) {
                         println!("idle and no backfill in flight → shutting down");
                         break;
