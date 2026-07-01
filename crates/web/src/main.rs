@@ -333,14 +333,14 @@ fn de_knobs(
                     <BdInput mono=true prefix="\u{20ac}".to_string()
                         value=format!("{:.0}", allowance.get_untracked())
                         on_input=Box::new(move |v| { if let Ok(n) = v.replace(',', "").parse::<f64>() { allowance.set(n.max(0.0)); } }) />
-                    <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Sparerpauschbetrag \u{2014} exempt per year (\u{20ac}1,000 in 2025)."</span>
+                    <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Sparerpauschbetrag / year."</span>
                 </div>
                 <div>
                     <span style=MINI_LABEL>"Church tax"</span>
                     <div style="display:flex;align-items:center;min-height:var(--control-md);">
                         {move || { let on = church.get(); view! { <BdSwitch checked=on on_change=Box::new(move |v| church.set(v)) label=(if on { "On" } else { "Off" }).to_string() /> } }}
                     </div>
-                    <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Adds Kirchensteuer (~+1.4 pts) on top of the base rate."</span>
+                    <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Kirchensteuer, ~+1.4 pts."</span>
                 </div>
             </div>
 
@@ -369,18 +369,18 @@ fn de_knobs(
                                 </div>
                             }
                         }}
-                        <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Share of ETF gains exempt (equity ETFs: 30%)."</span>
+                        <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Share of ETF gains exempt."</span>
                     </div>
                     <div>
                         <span style=MINI_LABEL>"Vorabpauschale"</span>
                         <div style="display:flex;align-items:center;min-height:var(--control-md);">
                             {move || { let on = vorab.get(); view! { <BdSwitch checked=on on_change=Box::new(move |v| vorab.set(v)) label=(if on { "On" } else { "Off" }).to_string() /> } }}
                         </div>
-                        <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Taxes a notional advance each year you hold."</span>
+                        <span style="display:block;margin-top:6px;font-size:11.5px;color:var(--text-muted);">"Notional advance taxed yearly."</span>
                     </div>
                 </div>
                 <div style="margin-top:10px;">
-                    {note_line("Simplification: ETF rules apply to every ETF position; your direct stocks keep the full rate. Only equity ETFs (\u{2265}51% stocks) actually qualify for the 30% Teilfreistellung \u{2014} bond or low-equity funds get less, or none.")}
+                    {note_line("ETF rules apply to ETF positions only; direct stocks keep the full rate. Equity ETFs (\u{2265}51% stocks) qualify for the 30% relief.")}
                 </div>
             </div>
 
