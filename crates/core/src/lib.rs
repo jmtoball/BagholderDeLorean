@@ -1984,6 +1984,123 @@ pub fn run_event_backtest(ticker: &str, bars: &[Bar], events: &[(NaiveDate, f64)
     run_signals_backtest(ticker, bars, &congress_signals(bars, events))
 }
 
+/// A no-trade "savings plan" benchmark: a deterministic account that grows a
+/// starting sum at a fixed annual `annual_rate`, dripping in `annual_contribution`
+/// of fresh cash, with no price data or trades. `compound` grows the whole balance
+/// exponentially — `(1+r)^(1/252)` per bar; otherwise gains accrue *linearly* off
+/// the starting sum (`initial * r / 252` per bar), a straight line.
+#[derive(Clone, Copy, Debug)]
+pub struct SavingsPlan {
+    pub annual_rate: f64,
+    pub annual_contribution: f64,
+    pub compound: bool,
+}
+
+/// Evolve a savings plan bar-by-bar. Returns `(values, gain_returns)` where
+/// `values[i]` is the account's dollar balance at bar `i` (`values[0] = initial`)
+/// and `gain_returns` is the per-bar *gain-only* return — the balance's growth
+/// with the contribution cash excluded, so a projection bootstrapped from it
+/// reflects investment growth, not deposits. `gain_returns.len() == n_bars - 1`.
+fn savings_plan_path(n_bars: usize, initial: f64, plan: &SavingsPlan) -> (Vec<f64>, Vec<f64>) {
+    let daily_factor = (1.0 + plan.annual_rate).powf(1.0 / 252.0);
+    let linear_gain = initial * plan.annual_rate / 252.0;
+    let contrib = plan.annual_contribution / 252.0;
+    let mut values = Vec::with_capacity(n_bars);
+    let mut rets = Vec::with_capacity(n_bars.saturating_sub(1));
+    let mut value = initial;
+    if n_bars > 0 {
+        values.push(value);
+    }
+    // The gain return is exactly constant — compound: `daily_factor - 1`; linear:
+    // `r/252` off the starting sum. Emitting the exact constant (not `gain/pre`,
+    // whose FP noise gives a tiny-but-nonzero variance) keeps the plan riskless:
+    // zero return variance → Sharpe 0, as befits a deterministic line.
+    let ret = if plan.compound { daily_factor - 1.0 } else { plan.annual_rate / 252.0 };
+    for _ in 1..n_bars {
+        let pre = value;
+        let gain = if plan.compound { pre * (daily_factor - 1.0) } else { linear_gain };
+        rets.push(ret);
+        value = pre + gain + contrib;
+        values.push(value);
+    }
+    (values, rets)
+}
+
+/// Per-bar gain-only returns for a savings plan over `n_bars` bars (see
+/// [`savings_plan_path`]). Exposed so the API can bootstrap a forward projection
+/// from gains alone — feeding the raw balance deltas would inject the contribution
+/// jumps into the fan. A constant `annual_rate` yields a constant series, so the
+/// projection fan collapses to a single line — that's expected.
+pub fn savings_plan_gain_returns(n_bars: usize, initial: f64, plan: &SavingsPlan) -> Vec<f64> {
+    savings_plan_path(n_bars, initial, plan).1
+}
+
+/// Run a savings-plan benchmark over the given date axis (borrowed from the run —
+/// the plan itself uses no price data). The `curve` stays in equity-multiple space
+/// (`equity = balance / initial`) so `final_value` and rendering match every other
+/// run; `final_value = initial + contributions + gains`. With a tax system and
+/// `sell_all`, terminal capital-gains tax is levied once on the accrued gain over
+/// basis (initial + contributions) and drags the last point; the pre-tax path is
+/// untouched. `trades` is always empty.
+/// ponytail: the terminal gain is taxed wholesale as long-term (a savings plan is a
+/// long-horizon hold); per-contribution holding periods and a fund's Vorabpauschale
+/// are out of scope for this synthetic benchmark.
+pub fn run_savings_plan(
+    dates: &[NaiveDate],
+    initial: f64,
+    plan: &SavingsPlan,
+    tax: &TaxConfig,
+) -> BacktestResult {
+    use chrono::Datelike;
+    let n = dates.len();
+    let (values, gain_rets) = savings_plan_path(n, initial, plan);
+    let mut curve: Vec<EquityPoint> = dates
+        .iter()
+        .zip(&values)
+        .map(|(d, v)| EquityPoint { date: *d, equity: v / initial })
+        .collect();
+
+    // Basis = money put in: the starting sum plus every per-bar contribution.
+    let basis = initial + plan.annual_contribution / 252.0 * n.saturating_sub(1) as f64;
+
+    let mut total_tax = 0.0;
+    let mut tax_per_year: Vec<YearTax> = Vec::new();
+    if tax.sell_all && tax.system != TaxSystem::None && n > 0 {
+        let gain = (values.last().copied().unwrap_or(initial) - basis).max(0.0);
+        let t = settle_year(tax, 0.0, gain, 0.0, 0.0, 0.0).0;
+        if t != 0.0 {
+            total_tax = t;
+            if let Some(last) = curve.last_mut() {
+                last.equity -= t / initial;
+            }
+            let year = dates.last().map(|d| d.year()).unwrap_or(0);
+            tax_per_year.push(YearTax { year, gain, tax: t });
+        }
+    }
+
+    let metrics = compute_metrics(&curve, &gain_rets);
+    let final_value = curve.last().map(|p| p.equity).unwrap_or(1.0) * initial;
+
+    BacktestResult {
+        curve,
+        metrics,
+        positions: vec![],
+        trades: vec![],
+        entry_date: None,
+        entry_pe: None,
+        entry_index: None,
+        entry_count: None,
+        initial_amount: initial,
+        final_value,
+        benchmark: None,
+        tax_system: tax.system,
+        total_tax,
+        tax_per_year,
+        pretax: None,
+        projection: None,
+    }
+}
+
 /// Entry when days-to-cover exceeds `dtc_min` AND price is above its `window`-day SMA.
 /// `si` = `(settlement_date, days_to_cover)` sorted ascending by date.
 /// Signal is held until momentum fades (price drops below SMA) — coarse biweekly
@@ -2817,7 +2934,7 @@ mod tests {
         };
         let n = 25;
         let mut a_prices = vec![100.0f64; n];
-        let mut b_prices = vec![100.0f64; n];
+        let b_prices = vec![100.0f64; n];
         *a_prices.last_mut().unwrap() = 200.0; // A spikes
         let bars_a = mk(&a_prices);
         let bars_b = mk(&b_prices);
@@ -3062,5 +3179,73 @@ mod tests {
         assert_eq!(sig[2], 0.0);
         // ...then long on a rising series (fast SMA above slow SMA)
         assert_eq!(sig[3], 1.0);
+    }
+
+    // --- H: savings-plan benchmark -----------------------------------------
+
+    /// `n` consecutive daily dates from 2000-01-03 — a plausible axis; the plan
+    /// math is per-bar, so the exact calendar dates don't affect the curve.
+    fn savings_dates(n: usize) -> Vec<NaiveDate> {
+        let start = NaiveDate::from_ymd_opt(2000, 1, 3).unwrap();
+        (0..n).map(|i| start + chrono::Duration::days(i as i64)).collect()
+    }
+
+    #[test]
+    fn savings_plan_flat_when_no_rate_and_no_contribution() {
+        let plan = SavingsPlan { annual_rate: 0.0, annual_contribution: 0.0, compound: true };
+        let r = run_savings_plan(&savings_dates(500), 10_000.0, &plan, &TaxConfig::default());
+        assert!(r.curve.iter().all(|p| (p.equity - 1.0).abs() < 1e-12), "curve must stay flat at 1.0");
+        assert!((r.final_value - 10_000.0).abs() < 1e-6, "final value equals the starting sum");
+        assert_eq!(r.total_tax, 0.0, "no gain → no tax");
+    }
+
+    #[test]
+    fn savings_plan_compound_outgrows_linear() {
+        let dates = savings_dates(252 * 5); // ~5 years
+        let comp = SavingsPlan { annual_rate: 0.07, annual_contribution: 0.0, compound: true };
+        let lin  = SavingsPlan { annual_rate: 0.07, annual_contribution: 0.0, compound: false };
+        let rc = run_savings_plan(&dates, 10_000.0, &comp, &TaxConfig::default());
+        let rl = run_savings_plan(&dates, 10_000.0, &lin, &TaxConfig::default());
+        // Both grow above the starting sum; compounding pulls ahead of the straight line.
+        assert!(rl.final_value > 10_000.0 && rc.final_value > 10_000.0);
+        assert!(rc.final_value > rl.final_value + 1.0, "compound {} should exceed linear {}", rc.final_value, rl.final_value);
+    }
+
+    #[test]
+    fn savings_plan_contributions_raise_final_value() {
+        let dates = savings_dates(252 * 3);
+        let plan = |c| SavingsPlan { annual_rate: 0.05, annual_contribution: c, compound: true };
+        let none = run_savings_plan(&dates, 10_000.0, &plan(0.0), &TaxConfig::default());
+        let with = run_savings_plan(&dates, 10_000.0, &plan(2_400.0), &TaxConfig::default());
+        assert!(with.final_value > none.final_value, "adding cash must raise the ending balance");
+    }
+
+    #[test]
+    fn savings_plan_has_no_trades() {
+        let plan = SavingsPlan { annual_rate: 0.08, annual_contribution: 1_200.0, compound: true };
+        let r = run_savings_plan(&savings_dates(252 * 4), 10_000.0, &plan, &TaxConfig::default());
+        assert!(r.trades.is_empty(), "a savings plan executes no trades");
+    }
+
+    #[test]
+    fn savings_plan_sell_all_taxes_terminal_gain_and_pretax_is_unchanged() {
+        let dates = savings_dates(252 * 6);
+        let plan = SavingsPlan { annual_rate: 0.09, annual_contribution: 3_000.0, compound: true };
+
+        let pre = run_savings_plan(&dates, 10_000.0, &plan, &TaxConfig::default());
+
+        let mut us = TaxConfig::preset(TaxSystem::UsFederal); // sell_all defaults true
+        us.taxable_income = 96_000.0;
+        let taxed = run_savings_plan(&dates, 10_000.0, &plan, &us);
+
+        assert!(taxed.total_tax > 0.0, "the accrued gain over basis is taxed at the terminal");
+        assert!(taxed.final_value < pre.final_value, "after-tax final < pre-tax final");
+        // Tax is levied on gain over basis (initial + contributions), not the whole balance.
+        let basis = 10_000.0 + 3_000.0 / 252.0 * (dates.len() - 1) as f64;
+        let gain = pre.final_value - basis;
+        assert!(gain > 0.0 && taxed.total_tax < gain, "tax {} must be a fraction of the gain {}", taxed.total_tax, gain);
+        // The pre-tax baseline run is untouched by the tax path.
+        assert_eq!(pre.total_tax, 0.0);
+        assert!(pre.curve.last().unwrap().equity > 1.0);
     }
 }
