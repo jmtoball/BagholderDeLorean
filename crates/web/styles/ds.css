@@ -48,6 +48,8 @@
   /* Semantic aliases */
   --surface-page:       var(--paper-100);
   --surface-card:       var(--paper-50);
+  /* Frosted paper for pills/chips floating over both dark and light sections. */
+  --surface-card-glass: rgba(245, 239, 227, 0.78);
   --surface-sunken:     var(--paper-200);
   --surface-ink:        var(--teal-700);
   --surface-ink-raised: var(--teal-600);

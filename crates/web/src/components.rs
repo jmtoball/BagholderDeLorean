@@ -650,6 +650,52 @@ pub fn Icon(name: String, #[prop(default = 16)] size: usize) -> impl IntoView {
     }
 }
 
+// ─── SectionNav ────────────────────────────────────────────────────────────────
+
+/// A fixed vertical rail of pills for navigating a stack of full-screen sections.
+/// The active pill fills with the accent; clicking jumps. Layout-only — the
+/// consumer owns scroll + active-index tracking. Ports `SectionNav` from
+/// `design_system/components/core`.
+#[component]
+pub fn BdSectionNav(
+    items: Vec<String>,
+    #[prop(into)] active: Signal<usize>,
+    #[prop(into)] on_jump: Callback<usize>,
+) -> impl IntoView {
+    view! {
+        <nav aria-label="Sections"
+             style="position:fixed;top:50%;right:18px;transform:translateY(-50%);z-index:60;\
+                    display:flex;flex-direction:column;gap:9px;">
+            {items.into_iter().enumerate().map(|(i, label)| {
+                let pill = move || format!(
+                    "display:flex;align-items:center;gap:7px;cursor:pointer;padding:5px 11px;\
+                     background:{};color:{};border:var(--border-line) solid var(--ink-900);\
+                     border-radius:var(--radius-full);box-shadow:{};\
+                     font-family:var(--font-mono);font-weight:700;font-size:10px;\
+                     letter-spacing:0.08em;text-transform:uppercase;\
+                     transition:background var(--dur) var(--ease-out),color var(--dur) var(--ease-out);",
+                    if active.get() == i { "var(--accent)" } else { "var(--surface-card-glass)" },
+                    if active.get() == i { "var(--paper-50)" } else { "var(--ink-800)" },
+                    if active.get() == i { "var(--shadow-hard-sm)" } else { "none" },
+                );
+                let dot = move || format!(
+                    "width:7px;height:7px;border-radius:50%;background:{};",
+                    if active.get() == i { "var(--paper-50)" } else { "var(--ink-500)" },
+                );
+                view! {
+                    <button type="button" title=label.clone()
+                        aria-current=move || active.get().eq(&i).then_some("true")
+                        on:click=move |_| on_jump.call(i)
+                        style=pill>
+                        <span style=dot />
+                        {label}
+                    </button>
+                }
+            }).collect_view()}
+        </nav>
+    }
+}
+
 // ─── SiteFooter ────────────────────────────────────────────────────────────────
 
 /// One nav link in a [`BdSiteFooter`].

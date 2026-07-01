@@ -17,7 +17,7 @@ use chrono::{Datelike, NaiveDate};
 use leptos::*;
 use serde::de::DeserializeOwned;
 
-use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSelect, BdSiteFooter, BdStat, BdSwitch, BdTabs, Chip, FooterLink, Icon, Overline, RateChips, TabItem};
+use components::{BdBadge, BdButton, BdCallout, BdCard, BdCheckbox, BdInput, BdSectionNav, BdSelect, BdSiteFooter, BdStat, BdSwitch, BdTabs, Chip, FooterLink, Icon, Overline, RateChips, TabItem};
 
 // ─── Chart geometry ───────────────────────────────────────────────────────────
 const W: f64   = 720.0;
@@ -960,6 +960,10 @@ fn field_heading(step: Option<&str>, title: &str, question: Option<&str>) -> Vie
     }.into_view()
 }
 
+/// The stacked full-screen sections, in order — ids for scroll targets and the
+/// index basis for the SectionNav rail (pills: Top / Gallery / Config / Simulation).
+const SECTION_IDS: [&str; 4] = ["top", "gallery", "config", "simulation"];
+
 /// Smooth-scroll a stacked section into view by id. `html { scroll-behavior:
 /// smooth }` (ds.css) animates it; Run jumps to Simulation, Back to Config.
 fn scroll_to(id: &str) {
@@ -1002,6 +1006,35 @@ fn App() -> impl IntoView {
     let tax_vorab      = create_rw_signal(true);
     let tax_sellall    = create_rw_signal(true);
     let project_fwd    = create_rw_signal(false);
+
+    // ── Section-nav rail: which stacked section is centred in the viewport ────
+    // Ordered to match the SectionNav pills (Top / Gallery / Config / Simulation).
+    let active_section = create_rw_signal(0usize);
+    {
+        let update = move || {
+            let vh = window().inner_height().ok().and_then(|v| v.as_f64()).unwrap_or(800.0);
+            let center = vh / 2.0;
+            let doc = document();
+            let mut best = 0usize;
+            let mut best_d = f64::MAX;
+            for (i, id) in SECTION_IDS.iter().enumerate() {
+                if let Some(el) = doc.get_element_by_id(id) {
+                    let r = el.get_bounding_client_rect();
+                    let mid = r.top() + r.height() / 2.0;
+                    let d = (mid - center).abs();
+                    if d < best_d { best_d = d; best = i; }
+                }
+            }
+            active_section.set(best);
+        };
+        // Keep the listeners for the app's lifetime (CSR never unmounts).
+        std::mem::forget(window_event_listener(ev::scroll, move |_| update()));
+        std::mem::forget(window_event_listener(ev::resize, move |_| update()));
+        request_animation_frame(move || update());
+    }
+    let jump_section = Callback::new(move |i: usize| {
+        scroll_to(SECTION_IDS.get(i).copied().unwrap_or("top"));
+    });
 
     // Fetch universe once on mount for datalist autocomplete.
     let universe = create_resource(
@@ -1133,8 +1166,15 @@ fn App() -> impl IntoView {
     };
 
     view! {
+        // ── Section-nav rail (fixed, right edge) ──────────────────────────────
+        <BdSectionNav
+            items=vec!["Top".to_string(), "Gallery".to_string(), "Config".to_string(), "Simulation".to_string()]
+            active=active_section
+            on_jump=jump_section
+        />
+
         // ── Hero (full-bleed cover + teal scrim) ──────────────────────────────
-        <section class="bd-grain" style="position:relative;overflow:hidden;min-height:100vh;\
+        <section id="top" class="bd-grain" style="position:relative;overflow:hidden;min-height:100vh;\
                        background:var(--teal-700);display:flex;flex-direction:column;\
                        border-bottom:var(--border-bold) solid var(--ink-900);">
             // Full-bleed cover art
