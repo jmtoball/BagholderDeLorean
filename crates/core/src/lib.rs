@@ -2053,6 +2053,10 @@ pub fn run_savings_plan(
 ) -> BacktestResult {
     use chrono::Datelike;
     let n = dates.len();
+    // Guard the equity-multiple division: a 0 (or negative) starting sum would make
+    // the whole curve NaN. Callers pass amount > 0 (the web form enforces it), but
+    // keep core self-defending against a direct API call.
+    let initial = if initial > 0.0 { initial } else { 1.0 };
     let (values, gain_rets) = savings_plan_path(n, initial, plan);
     let mut curve: Vec<EquityPoint> = dates
         .iter()
@@ -3225,6 +3229,14 @@ mod tests {
         let plan = SavingsPlan { annual_rate: 0.08, annual_contribution: 1_200.0, compound: true };
         let r = run_savings_plan(&savings_dates(252 * 4), 10_000.0, &plan, &TaxConfig::default());
         assert!(r.trades.is_empty(), "a savings plan executes no trades");
+    }
+
+    #[test]
+    fn savings_plan_zero_start_is_finite_not_nan() {
+        let plan = SavingsPlan { annual_rate: 0.07, annual_contribution: 1_000.0, compound: true };
+        let r = run_savings_plan(&savings_dates(252), 0.0, &plan, &TaxConfig::default());
+        assert!(r.curve.iter().all(|p| p.equity.is_finite()), "a 0 starting sum must not NaN the curve");
+        assert!(r.final_value.is_finite());
     }
 
     #[test]
